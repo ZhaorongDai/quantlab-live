@@ -315,8 +315,9 @@ def replay(
     Returns
     -------
     pathlib.Path
-        The replay directory, holding NautilusTrader's reports under
-        ``reports/``.
+        The replay directory, holding quantlab's ``metrics.json`` and
+        ``report.html`` computed from its records (``Run.report``), and
+        NautilusTrader's reports, for audit only, under ``reports/``.
 
     Raises
     ------
@@ -402,6 +403,7 @@ def replay(
     if strategy.failure is not None:
         bar, error = strategy.failure
         raise RuntimeError(f"the strategy failed on bar {bar.date()}: {error}") from error
+    run.report(out_dir)
     return out_dir
 
 

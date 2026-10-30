@@ -14,11 +14,16 @@ status file of quantlab's daily data update and runs quantlab's live
 prediction job as a subprocess bound to NUMA node 1. Run as a module
 (``python -m quantlab_live.quantlab_gate predict ...``), this file is that
 job.
+
+``Run.report`` writes a live or replay directory's ``metrics.json`` and
+``report.html`` with quantlab's metric and report functions, from the
+directory's records alone.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import subprocess
@@ -34,9 +39,22 @@ from quantlab.config import get_data_root
 from quantlab.dataset.base import MarketDataset
 from quantlab.portfolio.decision_inputs import DecisionInputs
 from quantlab.runs.backtest_run import BacktestRun, Market
+from quantlab.runs.backtest_report import ReportExtras, write_backtest_report
+from quantlab.runs.backtest_stats import (
+    exposure_stats,
+    return_stats,
+    round_trip_stats,
+    round_trips,
+    year_freq,
+)
 from quantlab.runs.live_predictions import LivePredictionStore
+from quantlab.runs.run_metrics import AccountRecord, run_metrics
+from quantlab.utils.atomic import write_json_atomically
+from quantlab.utils.jsonable import to_jsonable
 
+from quantlab_live import records
 from quantlab_live.trading.decision_bar import PREDICTION, DecisionBar
+from quantlab_live.trading.outcomes import REJECTED, VENUE_CANCELLED
 
 #: The exact quantlab imports of quantlab-live: module -> names.
 QUANTLAB_IMPORTS: dict[str, tuple[str, ...]] = {
@@ -45,9 +63,36 @@ QUANTLAB_IMPORTS: dict[str, tuple[str, ...]] = {
     "quantlab.config": ("get_data_root",),
     "quantlab.dataset.base": ("MarketDataset",),
     "quantlab.portfolio.decision_inputs": ("DecisionInputs",),
+    "quantlab.runs.backtest_report": ("ReportExtras", "write_backtest_report"),
     "quantlab.runs.backtest_run": ("BacktestRun", "Market"),
+    "quantlab.runs.backtest_stats": (
+        "exposure_stats", "return_stats", "round_trip_stats", "round_trips", "year_freq",
+    ),
     "quantlab.runs.live_predictions": ("LivePredictionStore",),
+    "quantlab.runs.run_metrics": ("AccountRecord", "run_metrics"),
+    "quantlab.utils.atomic": ("write_json_atomically",),
+    "quantlab.utils.jsonable": ("to_jsonable",),
 }
+
+#: What a directory's metrics and report are written to.
+METRICS_FILE, REPORT_FILE = "metrics.json", "report.html"
+
+#: A record's bars are daily.
+BAR_INTERVAL = "1D"
+
+#: The outcomes whose order found no fill: the report's rejected orders.
+_NO_FILL = (REJECTED, VENUE_CANCELLED)
+
+#: The notes of every metrics.json and report.html written from records.
+REPORT_NOTES = [
+    "Computed from quantlab-live's records: the strategy's equity and holdings "
+    "valued at quantlab's close, the fills of the order outcomes on the bar after "
+    "their decision, and the snapshots' positions.",
+    "A position change no fill explains (a delisting, a position taken over) is "
+    "settled at the bar's close mark without a fee and left out of turnover.",
+    "The trade metrics are the position level view: one entry to flat round trip "
+    "per symbol, split adjusted, with dividends in its profit.",
+]
 
 #: Decimal places of a raw price mark (instrument price precision).
 PRICE_PRECISION = 4
@@ -376,6 +421,92 @@ class Run:
             dtype=object,
         )
 
+    def report(self, directory, *, title: str | None = None) -> dict:
+        """Write ``metrics.json`` and ``report.html`` of a live or replay directory.
+
+        Both are quantlab's (``run_metrics`` and ``write_backtest_report``),
+        computed from the directory's records alone (``records.read_book``),
+        so live, replay and quantlab's research backtests share one
+        convention. NautilusTrader's own reports, mark-to-market and
+        portfolio statistics are never read. The account is the strategy's:
+
+        - its value is the equity record (cash plus holdings at quantlab's
+          close), and the value before the first bar is the first bar's;
+        - its fills are the outcomes' fills, on the bar after their decision
+          (a decision on the last bar has none yet); a position change no
+          fill explains (a delisting, a position held at the first bar) is a
+          settlement at the bar's close mark, without a fee;
+        - shares and prices are split adjusted to the first bar with the
+          run's split factors, and each dividend is a cash flow of the
+          position held into its ex-date;
+        - the rebalances are the bars whose decision sets a weight.
+
+        The ``whole`` block opens with the rows vectorbt's statistics give a
+        research run, computed from these fills and values with quantlab's
+        statistics.
+
+        Parameters
+        ----------
+        directory : path-like
+            The live or replay directory.
+        title : str, optional
+            The report's title; the directory's name by default.
+
+        Returns
+        -------
+        dict
+            The metrics, as ``metrics.json`` holds them.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the directory records no equity.
+
+        Examples
+        --------
+        ::
+
+            metrics = open_run(run_dir).report(replay_dir)
+            metrics["whole"]["Total Return [%]"]
+        """
+        directory = Path(directory)
+        book = records.read_book(directory)
+        bars = book.equity.index
+        split_factor, dividend = self.corporate_actions(bars[0], bars[-1])
+        symbols = book.positions.columns
+        factor = split_factor.reindex(index=bars, columns=symbols).fillna(1.0)
+        factor.iloc[0] = 1.0  # a split before the first bar is in its raw records
+        ratio = factor.cumprod()  # raw shares per unit of the first bar
+        held = book.positions.ffill().fillna(0.0) / ratio
+        marks = book.closes.ffill() * ratio
+        fills, settlements = _fills(book, ratio, held, marks)
+        flows = _dividends(dividend.reindex(index=bars, columns=symbols).fillna(0.0), ratio, held)
+        annualization = self._backtest_run.annualization
+        account = _account(book, fills, settlements, marks, year_freq(
+            BAR_INTERVAL, annualization.trading_days_per_year, annualization.session_minutes_per_day
+        ))
+        close = _on_bars(marks)
+        trips = round_trips(account.orders, close, cash_flows=flows)
+        account = dataclasses.replace(account, trades=trips)
+        metrics = run_metrics(account, engine_rows=_engine_rows(account, close, book.equity["cash"]))
+        metrics["notes"] = list(REPORT_NOTES)
+        metrics = to_jsonable(metrics)
+        write_json_atomically(directory / METRICS_FILE, metrics, indent=2)
+        write_backtest_report(
+            account,
+            directory / REPORT_FILE,
+            title=directory.name if title is None else title,
+            metrics=metrics,
+            weights=_on_bars(book.weights),
+            config=self._backtest_run.recipe(),
+            extras=ReportExtras(
+                tables={"Order outcomes": book.outcomes["status"].value_counts().sort_index().to_dict()},
+                setup={"Fees": "the broker's fills, from the order outcomes", "Run": self.run_dir.name},
+                prices=close,
+            ),
+        )
+        return metrics
+
 
 def open_run(run_dir: str | Path) -> Run:
     """Open the quantlab backtest run at ``run_dir``.
@@ -420,6 +551,142 @@ def _last_valuation(raw_close: pd.DataFrame, valuation: pd.DataFrame) -> pd.Data
     grown = raw_close.where(paired).ffill() * valuation / valuation.where(paired).ffill()
     value = grown.where(np.isfinite(grown) & (grown >= 0), last_close)
     return value.round(PRICE_PRECISION)
+
+
+def _on_bars(frame: pd.DataFrame) -> xr.DataArray:
+    """A frame by bar and symbol as a ``(timestamp, symbol)`` array."""
+    return xr.DataArray(
+        frame.to_numpy(dtype=float),
+        dims=("timestamp", "symbol"),
+        coords={"timestamp": pd.DatetimeIndex(frame.index).values, "symbol": frame.columns.to_numpy()},
+    )
+
+
+def _orders(rows: list[dict]) -> xr.Dataset:
+    """Fill rows as quantlab's orders dataset, on an ``order`` dimension."""
+    if not rows:
+        return xr.Dataset()
+    frame = pd.DataFrame(rows)
+    return xr.Dataset(
+        {name: ("order", frame[name].to_numpy()) for name in ("timestamp", "symbol", "size", "price", "fees")}
+    )
+
+
+def _fills(book, ratio: pd.DataFrame, held: pd.DataFrame, marks: pd.DataFrame) -> tuple[list[dict], list[dict]]:
+    """The fills of a book in first-bar units, settlements included, and the settlements.
+
+    An outcome's fills are on the bar after its decision. A held change the
+    fills of a bar do not explain is settled at that bar's mark.
+    """
+    bars = book.equity.index
+    outcomes = book.outcomes[book.outcomes["filled_quantity"] != 0]
+    by_bar: dict[pd.Timestamp, list[dict]] = {}
+    for row in outcomes.itertuples():
+        at = bars.searchsorted(pd.Timestamp(row.bar), "right")
+        if at == len(bars):
+            continue  # its fill bar is not valued yet
+        bar, units = bars[at], float(ratio.at[bars[at], row.symbol])
+        by_bar.setdefault(bar, []).append(
+            {"timestamp": bar, "symbol": int(row.symbol), "size": row.filled_quantity / units,
+             "price": row.avg_px * units, "fees": float(row.fees)}
+        )
+    fills, settlements = [], []
+    before = pd.Series(0.0, index=held.columns)
+    for bar in bars:
+        mine = by_bar.get(bar, [])
+        traded = pd.Series({f["symbol"]: 0.0 for f in mine}, dtype=float)
+        for fill in mine:
+            traded[fill["symbol"]] += fill["size"]
+        gap = held.loc[bar] - before.add(traded, fill_value=0.0).reindex(held.columns, fill_value=0.0)
+        fills.extend(mine)
+        for symbol, size in gap[~np.isclose(gap, 0.0, atol=1e-6)].items():
+            fills.append({"timestamp": bar, "symbol": int(symbol), "size": float(size),
+                          "price": float(marks.at[bar, symbol]), "fees": 0.0})
+            settlements.append({"settlement_timestamp": bar, "axis_symbol": int(symbol)})
+        before = held.loc[bar]
+    return fills, settlements
+
+
+def _dividends(dividend: pd.DataFrame, ratio: pd.DataFrame, held: pd.DataFrame) -> xr.Dataset | None:
+    """Each dividend paid to the units held into its ex-date, as round-trip cash flows."""
+    paid = dividend.iloc[1:] * ratio.iloc[1:] * held.shift(1).iloc[1:]
+    rows = [
+        (bar, int(symbol), float(amount))
+        for (bar, symbol), amount in paid.stack().items()
+        if amount != 0 and np.isfinite(amount)
+    ]
+    if not rows:
+        return None
+    bars, symbols, amounts = zip(*rows, strict=True)
+    return xr.Dataset({
+        "timestamp": ("flow", pd.DatetimeIndex(bars).values),
+        "symbol": ("flow", np.array(symbols)),
+        "amount": ("flow", np.array(amounts)),
+    })
+
+
+def _account(book, fills: list[dict], settlements: list[dict], marks: pd.DataFrame, year: pd.Timedelta) -> AccountRecord:
+    """The strategy's account record from its book and fills."""
+    bars = book.equity.index
+    equity = book.equity["equity"]
+    init_cash = float(equity.iloc[0])
+    returns = equity / equity.shift(1).fillna(init_cash) - 1.0
+    on_bars = dict(dims="timestamp", coords={"timestamp": bars.values})
+    decided = book.weights.notna().any(axis=1).to_numpy()
+    worth = book.positions.ffill().fillna(0.0) * book.closes.ffill()
+    holdings = worth.div(equity, axis=0).fillna(0.0)
+    deviation = []
+    for at in np.flatnonzero(decided[:-1]):
+        target = book.weights.iloc[at]
+        target = target[target.notna()]
+        deviation.append(float((holdings.iloc[at + 1].reindex(target.index, fill_value=0.0) - target).abs().max()))
+    rejected = [
+        {"fill_timestamp": _next_bar(bars, row.bar), "symbol": int(row.symbol), "status": row.status}
+        for row in book.outcomes[book.outcomes["status"].isin(_NO_FILL)].itertuples()
+    ]
+    return AccountRecord(
+        value=xr.DataArray(equity.to_numpy(dtype=float), **on_bars),
+        returns=xr.DataArray(returns.to_numpy(dtype=float), **on_bars),
+        orders=_orders(fills),
+        rebalances=xr.Dataset(
+            {"scheduled": ("timestamp", decided), "decided": ("timestamp", decided)},
+            coords={"timestamp": bars.values},
+        ),
+        init_cash=init_cash,
+        bar_interval=BAR_INTERVAL,
+        year_freq=year,
+        settlements=settlements,
+        rejected_orders=rejected,
+        max_target_deviation=max(deviation) if deviation else None,
+        holdings=_on_bars(holdings),
+    )
+
+
+def _next_bar(bars: pd.DatetimeIndex, bar) -> pd.Timestamp:
+    """The bar after ``bar``, or ``bar`` itself when it is the last."""
+    at = bars.searchsorted(pd.Timestamp(bar), "right")
+    return bars[min(at, len(bars) - 1)]
+
+
+def _engine_rows(account: AccountRecord, close: xr.DataArray, cash: pd.Series) -> dict:
+    """The rows vectorbt's statistics open a research run's ``whole`` block with, from fills and values."""
+    stats = return_stats(account.returns, bar_interval=account.bar_interval, year_freq=account.year_freq)
+    orders = account.orders
+    fees = float(orders["fees"].sum()) if orders.sizes.get("order", 0) else 0.0
+    cash_on_bars = xr.DataArray(cash.to_numpy(dtype=float), dims="timestamp", coords={"timestamp": close.timestamp})
+    exposure_fills = orders if orders.sizes.get("order", 0) else xr.Dataset()
+    rows = {name: stats[name] for name in ("Start", "End", "Period")}
+    rows["Start Value"] = account.init_cash
+    rows["End Value"] = float(account.value[-1])
+    rows["Total Return [%]"] = stats["Total Return [%]"]
+    rows.update(exposure_stats(exposure_fills, close, cash_on_bars))
+    rows["Total Fees Paid"] = fees
+    rows["Max Drawdown [%]"] = stats["Max Drawdown [%]"]
+    rows["Max Drawdown Duration"] = stats["Max Drawdown Duration"]
+    rows.update(round_trip_stats(account.trades, bar_interval=account.bar_interval))
+    for name in ("Sharpe Ratio", "Calmar Ratio", "Omega Ratio", "Sortino Ratio"):
+        rows[name] = stats[name]
+    return rows
 
 
 @dataclass(frozen=True)
