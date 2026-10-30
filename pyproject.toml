@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantlab-live"
+version = "0.1.0"
+description = "Live trading and replay of quantlab strategies, NautilusTrader first."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "quantlab-py[all]",
+    # v2 is a release candidate; the pin moves only for a needed fix or to 2.0.0 final.
+    "nautilus-trader==2.0.0rc8",
+    "pyarrow",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
+]
+
+[tool.uv.sources]
+quantlab-py = { path = "../quantlab", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quantlab_live*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+# The docstrings' Examples run as doctests beside the tests.
+testpaths = ["tests", "quantlab_live"]
+addopts = ["--doctest-modules"]
+doctest_optionflags = ["ELLIPSIS"]
+faulthandler_timeout = 300
+faulthandler_exit_on_timeout = true
