@@ -51,6 +51,7 @@ OUTCOME_SCHEMA = pa.schema(
         ("order_quantity", pa.float64()),
         ("filled_quantity", pa.float64()),
         ("avg_px", pa.float64()),
+        ("fees", pa.float64()),
         ("status", pa.string()),
     ]
 )
@@ -157,15 +158,16 @@ def write_outcomes(directory, bar: pd.Timestamp, outcomes: pd.DataFrame) -> Path
     ----------
     outcomes : pandas.DataFrame
         By ``symbol``: the signed ``order_quantity`` and ``filled_quantity``,
-        the fills' ``avg_px`` (NaN without a fill) and the ``status``
-        (``trading.outcomes``).
+        the fills' ``avg_px`` (NaN without a fill), their ``fees`` in cash
+        and the ``status`` (``trading.outcomes``).
 
     Examples
     --------
     >>> import tempfile
     >>> directory = tempfile.mkdtemp()
     >>> outcomes = pd.DataFrame(
-    ...     {"order_quantity": [50.0], "filled_quantity": [50.0], "avg_px": [10.5], "status": ["filled"]},
+    ...     {"order_quantity": [50.0], "filled_quantity": [50.0], "avg_px": [10.5], "fees": [1.0],
+    ...      "status": ["filled"]},
     ...     index=pd.Index([10001], name="symbol"),
     ... )
     >>> _ = write_outcomes(directory, pd.Timestamp("2024-01-02"), outcomes)
@@ -251,6 +253,89 @@ def read_equity(directory) -> pd.DataFrame:
     See ``append_equity``.
     """
     return pq.read_table(Path(directory) / EQUITY).to_pandas().set_index("bar")
+
+
+@dataclass(frozen=True)
+class Book:
+    """Every bar a directory records, in raw units: what a report is computed on.
+
+    Attributes
+    ----------
+    equity : pandas.DataFrame
+        ``read_equity``: ``cash``, ``holdings`` and ``equity`` by ``bar``; the
+        book's bars.
+    positions : pandas.DataFrame
+        The signed raw shares held at each bar's close (its snapshot), by
+        ``bar`` and one column per symbol; 0 where not held, NaN on a bar
+        without a snapshot.
+    closes : pandas.DataFrame
+        The raw close each bar's decision marks every symbol at (the price
+        equity is valued at), by ``bar`` and symbol; NaN where a decision
+        has none.
+    weights : pandas.DataFrame
+        The target weight of each bar's decision, by ``bar`` and symbol; NaN
+        where the decision keeps a holding.
+    outcomes : pandas.DataFrame
+        Every bar's outcomes (``write_outcomes``), with their ``bar`` and
+        ``symbol`` as columns; ``fees`` is 0 in a file written without it.
+    """
+
+    equity: pd.DataFrame
+    positions: pd.DataFrame
+    closes: pd.DataFrame
+    weights: pd.DataFrame
+    outcomes: pd.DataFrame
+
+
+def read_book(directory) -> Book:
+    """Return every bar ``directory`` records: its equity, snapshots, decisions and outcomes.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the directory records no equity.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> directory = tempfile.mkdtemp()
+    >>> bar = pd.Timestamp("2024-01-02")
+    >>> positions = pd.DataFrame({"quantity": [50.0]}, index=pd.Index([10001], name="symbol"))
+    >>> _ = write_snapshot(directory, Snapshot(bar, positions, cash=500.0))
+    >>> _ = append_equity(directory, bar, cash=500.0, holdings=500.0)
+    >>> book = read_book(directory)
+    >>> book.equity["equity"].tolist(), book.positions.loc[bar].to_dict()
+    ([1000.0], {10001: 50.0})
+    """
+    equity = read_equity(directory)
+    snapshots = {bar: read_snapshot(directory, bar).positions["quantity"] for bar in _bars(directory, SNAPSHOTS)}
+    decisions = {bar: read_decision(directory, bar) for bar in _bars(directory, DECISIONS)}
+    by_bar = {
+        name: pd.DataFrame(columns).T.reindex(equity.index)
+        for name, columns in (
+            ("positions", snapshots),
+            ("closes", {bar: d["close"] for bar, d in decisions.items()}),
+            ("weights", {bar: d["weight"] for bar, d in decisions.items()}),
+        )
+    }
+    symbols = by_bar["positions"].columns.union(by_bar["closes"].columns).astype("int64")
+    positions, closes, weights = (
+        by_bar[name].reindex(columns=symbols).astype(float).rename_axis(index="bar", columns="symbol")
+        for name in ("positions", "closes", "weights")
+    )
+    snapshot_bars = pd.Series(positions.index.isin(list(snapshots)), index=positions.index)
+    positions = positions.mask(positions.isna() & snapshot_bars.to_numpy()[:, None], 0.0)
+    frames = [_keyed(bar, read_outcomes(directory, bar)) for bar in _bars(directory, OUTCOMES)]
+    outcomes = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=OUTCOME_SCHEMA.names)
+    if "fees" not in outcomes:
+        outcomes["fees"] = 0.0
+    outcomes["fees"] = outcomes["fees"].fillna(0.0)
+    return Book(equity, positions, closes, weights, outcomes)
+
+
+def _bars(directory, kind: str) -> list[pd.Timestamp]:
+    """The bars ``kind`` records in ``directory``, in order."""
+    return sorted(pd.Timestamp(path.stem) for path in (Path(directory) / kind).glob("*.parquet"))
 
 
 class SecurityMap:

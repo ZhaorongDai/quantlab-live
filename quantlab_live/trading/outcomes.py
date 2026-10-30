@@ -53,7 +53,8 @@ SKIPS = (UNMAPPED, FOREIGN)
 #: unsigned leaves quantity and whether we asked to cancel it.
 ORDER_COLUMNS = ["symbol", "primary", "child", "status", "leaves", "cancel_requested"]
 #: The columns of a fills frame: the order filled, its symbol, the signed
-#: quantity and the price.
+#: quantity and the price. An optional ``fees`` column holds each fill's
+#: commission in the account's currency.
 FILL_COLUMNS = ["client_order_id", "symbol", "quantity", "price"]
 #: A child in one of these states may still change.
 _UNSETTLED = {
@@ -77,7 +78,7 @@ def order_outcomes(
         The bar's orders, primaries and children, by client order id, with
         the ``ORDER_COLUMNS``.
     fills : pandas.DataFrame
-        Their fills, with the ``FILL_COLUMNS``.
+        Their fills, with the ``FILL_COLUMNS`` and optionally ``fees``.
     positions : pandas.Series or None
         The signed position by symbol once the orders are done; when given,
         a symbol whose position is not its decision's position plus its
@@ -87,7 +88,8 @@ def order_outcomes(
     -------
     pandas.DataFrame
         By ``symbol``: the signed ``order_quantity`` and ``filled_quantity``,
-        the fills' ``avg_px`` (NaN without a fill) and the ``status``.
+        the fills' ``avg_px`` (NaN without a fill), their summed ``fees`` (0
+        when ``fills`` has no ``fees``) and the ``status``.
 
     Examples
     --------
@@ -113,15 +115,17 @@ def order_outcomes(
         filled = float(done["quantity"].sum())
         traded = float(done["quantity"].abs().sum())
         avg_px = float((done["quantity"].abs() * done["price"]).sum() / traded) if traded else float("nan")
+        fees = float(done["fees"].sum()) if "fees" in done else 0.0
         position = None if positions is None else float(positions.get(symbol, 0.0))
         rows[symbol] = {
             "order_quantity": float(row["order_quantity"]),
             "filled_quantity": filled,
             "avg_px": avg_px,
+            "fees": fees,
             "status": _status(row, mine, filled, position),
         }
     frame = pd.DataFrame.from_dict(
-        rows, orient="index", columns=["order_quantity", "filled_quantity", "avg_px", "status"]
+        rows, orient="index", columns=["order_quantity", "filled_quantity", "avg_px", "fees", "status"]
     )
     return frame.rename_axis("symbol")
 
@@ -172,8 +176,8 @@ def order_frames(orders, symbol_of) -> tuple[pd.DataFrame, pd.DataFrame]:
     (pandas.DataFrame, pandas.DataFrame)
         The orders (``ORDER_COLUMNS`` by client order id, plus their ``tags``
         and ``ts_init``)
-        and their fills (``FILL_COLUMNS`` plus ``ts_event``), in the orders'
-        units.
+        and their fills (``FILL_COLUMNS`` plus ``fees`` and ``ts_event``), in
+        the orders' units.
 
     Examples
     --------
@@ -207,8 +211,9 @@ def order_frames(orders, symbol_of) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "symbol": symbol,
                         "quantity": sign * float(event.last_qty),
                         "price": float(event.last_px),
+                        "fees": float(event.commission),
                         "ts_event": event.ts_event,
                     }
                 )
     frame = pd.DataFrame.from_dict(rows, orient="index", columns=[*ORDER_COLUMNS, "tags", "ts_init"])
-    return frame, pd.DataFrame(fill_rows, columns=[*FILL_COLUMNS, "ts_event"])
+    return frame, pd.DataFrame(fill_rows, columns=[*FILL_COLUMNS, "fees", "ts_event"])
