@@ -13,6 +13,7 @@ dependencies = [
     # v2 is a release candidate; the pin moves only for a needed fix or to 2.0.0 final.
     "nautilus-trader==2.0.0rc8",
     "pyarrow",
+    "exchange-calendars",
 ]
 
 [dependency-groups]

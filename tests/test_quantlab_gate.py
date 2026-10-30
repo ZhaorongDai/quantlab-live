@@ -71,6 +71,16 @@ def test_bars_survive_the_custom_data_round_trip(closed_run):
     xr.testing.assert_identical(again.predictions(), bar.predictions())
 
 
+def test_a_run_gives_its_initial_cash_and_the_raw_opening_prints(closed_run):
+    run_dir, _ = closed_run
+    open_, _ = _market()
+    run = open_run(run_dir)
+    assert run.init_cash == 10_000.0
+    opens = run.opens()
+    assert list(opens.index) == list(BARS)
+    assert opens.to_dict("list") == {p: open_[p] for p in PERMNOS}
+
+
 def test_a_bar_after_the_data_is_not_ready(closed_run):
     run_dir, _ = closed_run
     with pytest.raises(QuantlabNotReady):

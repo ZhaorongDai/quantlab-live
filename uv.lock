@@ -3387,6 +3387,7 @@ name = "quantlab-live"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "exchange-calendars" },
     { name = "nautilus-trader" },
     { name = "pyarrow" },
     { name = "quantlab-py", extra = ["all"] },
@@ -3400,6 +3401,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "exchange-calendars" },
     { name = "nautilus-trader", specifier = "==2.0.0rc8" },
     { name = "pyarrow" },
     { name = "quantlab-py", extras = ["all"], editable = "../quantlab" },

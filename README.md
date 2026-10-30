@@ -31,6 +31,8 @@ Public functions carry NumPy docstrings with an Examples section; the examples r
 ## Layout
 
 - `quantlab_live/quantlab_gate.py`: the only module that imports quantlab (an exact allowlist, enforced by a test).
-- `quantlab_live/trading/`: NautilusTrader extension classes; `DecisionBar` is one decision bar's quantlab inputs as custom data.
+- `quantlab_live/trading/`: NautilusTrader extension classes, the same live and in replay: `DecisionBar` (one decision bar's quantlab inputs as custom data), `QuantlabStrategy`, its target sources and the `ScheduledExecution` execution algorithm.
+- `quantlab_live/records.py`: the repository's own records (decisions, outcomes, snapshots, equity), typed parquet in raw units.
+- `quantlab_live/replay.py`: `replay(run_dir, loop="open")` trades a quantlab run on NautilusTrader's `BacktestEngine` and writes the records and NautilusTrader's reports.
 
 The domain vocabulary is in [GLOSSARY.md](GLOSSARY.md).

@@ -125,6 +125,46 @@ class Run:
                 frame = frame.join(row.add_prefix(PREDICTION))
             yield DecisionBar.from_frame(t, frame.rename_axis("symbol"))
 
+    @property
+    def init_cash(self) -> float:
+        """The run's initial cash.
+
+        Examples
+        --------
+        ::
+
+            capital = run.init_cash
+        """
+        return self._backtest_run.init_cash
+
+    def opens(self, start=None, end=None) -> pd.DataFrame:
+        """Return the raw open of every dataset bar from ``start`` to ``end``.
+
+        A replay feeds these as the opening prints. NaN where the market had
+        no open.
+
+        Parameters
+        ----------
+        start, end : datetime-like, optional
+            Default to the run's window.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Indexed by bar, one column per symbol.
+
+        Examples
+        --------
+        ::
+
+            first_prints = run.opens().iloc[0]
+        """
+        start = self.window[0] if start is None else pd.Timestamp(start)
+        end = self.window[1] if end is None else pd.Timestamp(end)
+        prices = self._dataset.panel(start, end).load()
+        frame = prices["open"].transpose("timestamp", "symbol").to_pandas()
+        return frame.rename_axis(index=None, columns=None)
+
     def targets(self, loop: str) -> DecisionInputs | xr.DataArray:
         """Return the raw inputs of the run's targets.
 
