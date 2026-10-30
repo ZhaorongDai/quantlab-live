@@ -172,9 +172,14 @@ def brief(live_dir, date, *, mailer=None) -> Briefing:
 
     Examples
     --------
-    ::
-
-        brief(live_dir, "2026-10-30")  # briefs the close of 2026-10-29
+    >>> import tempfile
+    >>> live_dir = Path(tempfile.mkdtemp())
+    >>> _ = (live_dir / "live.toml").write_text('run = "run"\\n')
+    >>> class Printer:
+    ...     def send(self, subject, body, log=""):
+    ...         print(subject)
+    >>> composed = brief(live_dir, "2024-01-03", mailer=Printer())
+    quantlab-live 2024-01-03: after the open: NEEDS CHECKING
     """
     composed = briefing(live_dir, date)
     if mailer is None:
@@ -193,9 +198,11 @@ def briefing(live_dir, date) -> Briefing:
 
     Examples
     --------
-    ::
-
-        print(briefing(live_dir, "2026-10-30").text())
+    >>> import tempfile
+    >>> live_dir = Path(tempfile.mkdtemp())
+    >>> _ = (live_dir / "live.toml").write_text('run = "run"\\n')
+    >>> briefing(live_dir, "2024-01-03").checks  # a live directory with no records yet
+    ('no decision before 2024-01-03',)
     """
     live_dir = Path(live_dir)
     config = load_config(live_dir)

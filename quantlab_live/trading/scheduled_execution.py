@@ -296,9 +296,9 @@ class ScheduledExecution(ExecutionAlgorithm):
 
     Examples
     --------
-    ::
-
-        algorithm = ScheduledExecution(ExecAlgorithmId("SCHEDULED"), ExecutionPlan("close_auction"), Environment.BACKTEST)
+    >>> algorithm = ScheduledExecution(ExecAlgorithmId("SCHEDULED"), ExecutionPlan("close_auction"), Environment.BACKTEST)
+    >>> algorithm.exec_algorithm_id
+    ExecAlgorithmId('SCHEDULED')
     """
 
     def __new__(cls, *args, **kwargs):

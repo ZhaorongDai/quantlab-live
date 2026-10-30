@@ -239,9 +239,17 @@ def order_frames(orders, symbol_of) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Examples
     --------
-    ::
-
-        frame, fills = order_frames(cache.orders(strategy_id=strategy_id), security_map.to_symbol)
+    >>> from nautilus_trader.core import UUID4
+    >>> from nautilus_trader.model import (
+    ...     ClientOrderId, InstrumentId, MarketOrder, Quantity, StrategyId, TimeInForce, TraderId,
+    ... )
+    >>> order = MarketOrder(
+    ...     TraderId("QL-001"), StrategyId("QUANTLAB-001"), InstrumentId.from_str("AAA.NYSE"), ClientOrderId("O-1"),
+    ...     OrderSide.BUY, Quantity(100, 0), UUID4(), 0, TimeInForce.DAY, False, False, tags=["bar=2024-01-02"],
+    ... )
+    >>> frame, fills = order_frames([order], symbol_of=lambda instrument_id: 10001)
+    >>> frame.loc["O-1", ["primary", "status", "cancel_requested", "tags"]].to_dict(), len(fills)
+    ({'primary': 'O-1', 'status': 'INITIALIZED', 'cancel_requested': False, 'tags': ['bar=2024-01-02']}, 0)
     """
     rows, fill_rows = {}, []
     for order in orders:

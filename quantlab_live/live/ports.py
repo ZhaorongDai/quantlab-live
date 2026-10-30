@@ -65,9 +65,13 @@ class Ports:
 
     Examples
     --------
-    ::
-
-        day(live_dir, Ports(prepare=..., launch_node=..., mailer=..., clock=...))
+    >>> from quantlab_live.quantlab_gate import Pending
+    >>> ports = Ports(
+    ...     prepare=lambda date: Pending("the data update is running"), launch_node=None,
+    ...     mailer=UnconfiguredMailer("no mail in this example"), clock=WallClock(),
+    ... )
+    >>> ports.prepare(pd.Timestamp("2024-01-03")).reason
+    'the data update is running'
     """
 
     prepare: Callable[[pd.Timestamp], Ready | Pending]
@@ -77,7 +81,21 @@ class Ports:
 
 
 def default_ports(live_dir, config: LiveConfig) -> Ports:
-    """The production adapters of a live directory's ports."""
+    """The production adapters of a live directory's ports.
+
+    ``prepare`` is ``quantlab_gate.prepare_day`` on the run and its live
+    store, the node launcher starts a ``node`` process per attempt bound to
+    the configured CPUs, the mailer reads the owner's mail settings
+    (``SmtpMailer.from_env_file``) and the clock is the wall clock.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> live_dir = Path(tempfile.mkdtemp())
+    >>> ports = default_ports(live_dir, LiveConfig(run="run", live_dir=live_dir, cpus="0-3"))
+    >>> type(ports.launch_node).__name__, ports.launch_node.cpus, type(ports.clock).__name__
+    ('SubprocessLauncher', '0-3', 'WallClock')
+    """
 
     def prepare(date):
         return prepare_day(config.run_dir, date, store=config.store_dir, may_lag=config.may_lag, cpus=config.cpus)

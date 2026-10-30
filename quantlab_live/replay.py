@@ -340,11 +340,26 @@ def replay(
 
     Examples
     --------
-    ::
+    A run that buys half its capital of one symbol on its first bar, replayed
+    open loop, fills at the next bar's opening print:
 
-        out_dir = replay("runs/USEquityCrossectionSelectStockVectorBt_20261020")
-        january = replay(run_dir, loop="open", start="2024-01-02", end="2024-01-31")
-        crashed = replay(run_dir, plan="12:45", restarts=["2024-01-03 10:00", "2024-01-03 13:00"])
+    >>> import tempfile
+    >>> from tests.quantlab_run_fixture import build_quantlab_run
+    >>> bars = pd.bdate_range("2024-01-02", periods=3)
+    >>> run_dir = build_quantlab_run(
+    ...     Path(tempfile.mkdtemp()), bars, {10001: [10.0, 10.5, 11.0]}, {10001: [10.0, 11.0, 12.0]},
+    ...     {10001: [0.5, float("nan"), float("nan")]},
+    ... )
+    >>> out_dir = replay(run_dir, loop="open")
+    >>> outcome = records.read_outcomes(out_dir, bars[0]).loc[10001]
+    >>> outcome["filled_quantity"], outcome["avg_px"], outcome["status"]
+    (np.float64(500.0), np.float64(10.5), 'filled')
+    >>> (out_dir / "metrics.json").exists()
+    True
+
+    A closed loop (the default) decides with the run's construction, and
+    ``plan="12:45"`` or ``restarts=["2024-01-03 10:00"]`` replay a timed plan
+    or a crash.
     """
     if loop not in ("closed", "open"):
         raise ValueError(f"loop must be 'closed' or 'open', not {loop!r}")

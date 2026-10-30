@@ -470,10 +470,16 @@ def day(live_dir, ports: Ports | None = None) -> str:
 
     Examples
     --------
-    ::
+    cron calls it every hour (``python -m quantlab_live day LIVE_DIR``). On
+    a day the exchange is closed it does nothing:
 
-        # crontab: 0 * * * *  taskset -c 64-127 .venv/bin/python -m quantlab_live day LIVE_DIR
-        day(live_dir)
+    >>> import tempfile
+    >>> from types import SimpleNamespace
+    >>> live_dir = Path(tempfile.mkdtemp())
+    >>> _ = (live_dir / "live.toml").write_text('run = "run"\\n')
+    >>> clock = SimpleNamespace(now=lambda: pd.Timestamp("2024-07-04 12:00", tz="UTC"))
+    >>> day(live_dir, Ports(prepare=None, launch_node=None, mailer=None, clock=clock))
+    '2024-07-04 is not an XNYS trading day'
     """
     live_dir = Path(live_dir)
     config = load_config(live_dir)

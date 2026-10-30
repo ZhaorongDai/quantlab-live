@@ -54,9 +54,9 @@ class DecisionSource(DataActor):
 
     Examples
     --------
-    ::
-
-        source = DecisionSource([bar], check=lambda cache: None)
+    >>> source = DecisionSource([], check=lambda cache: None)
+    >>> source.refused, source.published
+    (None, False)
     """
 
     def __new__(cls, *args, **kwargs):
@@ -201,11 +201,23 @@ def parts(
 
     Examples
     --------
-    ::
-
-        trading = parts(run, decisions, loop="closed", plan="open_auction",
-                        security_map=security_map, environment=Environment.LIVE, bars=[bar])
-        trading.add_to(node)
+    >>> import tempfile
+    >>> from pathlib import Path
+    >>> from quantlab_live.quantlab_gate import open_run
+    >>> from quantlab_live.replay import IdentityMap
+    >>> from quantlab_live.trading.strategy import DirectoryDecisions
+    >>> from tests.quantlab_run_fixture import build_quantlab_run
+    >>> bars = pd.bdate_range("2024-01-02", periods=3)
+    >>> run_dir = build_quantlab_run(
+    ...     Path(tempfile.mkdtemp()), bars, {10001: [10.0, 10.5, 11.0]}, {10001: [10.0, 11.0, 12.0]},
+    ...     {10001: [0.5, float("nan"), float("nan")]},
+    ... )
+    >>> trading = parts(
+    ...     open_run(run_dir), DirectoryDecisions(tempfile.mkdtemp()), loop="open", plan="open_auction",
+    ...     security_map=IdentityMap(), environment=Environment.LIVE, bars=[],
+    ... )
+    >>> type(trading.strategy).__name__, type(trading.exec_algorithm).__name__, type(trading.decision_source).__name__
+    ('QuantlabStrategy', 'ScheduledExecution', 'DecisionSource')
     """
     if loop not in ("closed", "open"):
         raise ValueError(f"loop must be 'closed' or 'open', not {loop!r}")

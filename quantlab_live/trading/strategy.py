@@ -241,9 +241,15 @@ class QuantlabStrategy(Strategy):
 
     Examples
     --------
-    ::
-
-        strategy = QuantlabStrategy(targets, security_map, ExecAlgorithmId("SCHEDULED"), DirectoryDecisions(live_dir))
+    >>> import tempfile
+    >>> from quantlab_live.replay import IdentityMap
+    >>> targets = None  # a TargetSource: RebalanceTableTargets or ConstructorTargets (``trading.parts``)
+    >>> strategy = QuantlabStrategy(
+    ...     targets, IdentityMap(), ExecAlgorithmId("SCHEDULED"), DirectoryDecisions(tempfile.mkdtemp()),
+    ...     initial_capital=10_000.0, pnl=AccountPnl(10_000.0),
+    ... )
+    >>> strategy.strategy_id
+    StrategyId('QUANTLAB-001')
     """
 
     def __new__(cls, *args, external_order_claims=(), **kwargs):
@@ -438,9 +444,12 @@ def account_cash(cache, account) -> float:
 
     Examples
     --------
-    ::
-
-        cash = account_cash(node.cache, node.cache.account_for_venue(Venue("SMART")))
+    >>> from types import SimpleNamespace
+    >>> account = SimpleNamespace(id="SMART-001", balance_total=lambda: SimpleNamespace(as_decimal=lambda: 10_000))
+    >>> held = [SimpleNamespace(signed_qty=100, avg_px_open=25.0), SimpleNamespace(signed_qty=-10, avg_px_open=50.0)]
+    >>> cache = SimpleNamespace(positions_open=lambda account_id: held)
+    >>> account_cash(cache, account)
+    8000.0
     """
     balance = float(account.balance_total().as_decimal())
     positions = cache.positions_open(account_id=account.id)

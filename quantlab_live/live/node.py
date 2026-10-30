@@ -121,10 +121,18 @@ def run_node(
 
     Examples
     --------
-    ::
+    A start the guards refuse writes its step report and builds no node:
 
-        report = run_node("live/us3000_paper", "2026-11-02")
-        report.started, report.outcomes
+    >>> import tempfile
+    >>> live_dir = Path(tempfile.mkdtemp())
+    >>> _ = (live_dir / "live.toml").write_text(
+    ...     'run = "run"\\nbroker = "ibkr_paper"\\naccount_id = "U123"\\ngateway_port = 4002\\n'
+    ... )
+    >>> report = run_node(live_dir, "2024-01-08")
+    >>> report.started, report.error
+    (False, 'the start is refused: the ibkr_paper profile trades paper, but account U123 is live')
+    >>> records.read_step_report(live_dir / "steps" / "2024-01-08" / "manual-trade.json") == report
+    True
     """
     live_dir = Path(live_dir)
     date = pd.Timestamp(date).normalize()
@@ -372,9 +380,12 @@ def state_alerts(cache, security_map) -> list[str]:
 
     Examples
     --------
-    ::
-
-        alerts = state_alerts(node.cache, security_map)
+    >>> from types import SimpleNamespace
+    >>> from nautilus_trader.model import InstrumentId
+    >>> position = SimpleNamespace(instrument_id=InstrumentId.from_str("IBM.NYSE"), signed_qty=10)
+    >>> cache = SimpleNamespace(positions_open=lambda: [position])
+    >>> state_alerts(cache, records.SecurityMap())
+    ['held 10 of IBM.NYSE, unmapped']
     """
     alerts = []
     for position in cache.positions_open():
