@@ -165,16 +165,19 @@ class Run:
         frame = prices["open"].transpose("timestamp", "symbol").to_pandas()
         return frame.rename_axis(index=None, columns=None)
 
-    def targets(self, loop: str) -> DecisionInputs | xr.DataArray:
+    def targets(self, loop: str, *, end=None) -> DecisionInputs | xr.DataArray:
         """Return the raw inputs of the run's targets.
 
         Parameters
         ----------
         loop : {"closed", "open"}
             ``"closed"``: quantlab's decision inputs (the run's rule bound to
-            its label specs, schedule left open-ended as a live run's is);
-            ``"open"``: the run's rebalance table, ``weight`` on
-            ``(timestamp, symbol)``.
+            its label specs); ``"open"``: the run's rebalance table,
+            ``weight`` on ``(timestamp, symbol)``.
+        end : datetime-like, optional
+            Closed loop: the last bar of a replay, which is not decided (its
+            orders would have no next bar to fill on). Without it the
+            schedule is open-ended, as a live run's is.
 
         Raises
         ------
@@ -202,7 +205,7 @@ class Run:
                 f"quantlab run {self.run_dir} is valued at raw prices; a closed loop "
                 f"decides on adjusted closes"
             )
-        return DecisionInputs.from_run(self.run_dir, end=None)
+        return DecisionInputs.from_run(self.run_dir, end=end)
 
 
 def open_run(run_dir: str | Path) -> Run:
