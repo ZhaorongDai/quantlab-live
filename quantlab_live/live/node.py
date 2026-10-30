@@ -3,10 +3,13 @@
 A node process trades one day, or settles it (settle-only), and reports to
 the supervisor through its step report only (``records.StepReport``):
 
-1. the start guards run before the node is built (``guards.start_refusals``);
+1. the start guards run before the node is built (``guards.start_refusals``),
+   with the real-money switches of ``live.toml`` and the arming file;
 2. the security map is rebuilt on the day from the run's listings, on top of
    its history;
-3. a ``LiveNode`` is built with the broker profile's clients, its cache in
+3. a ``LiveNode`` is built with the broker profile's clients, the risk
+   engine's notional cap on every mapped instrument and its submit rate
+   (``LiveConfig.risk_engine_config``), its cache in
    Redis under the live directory's fixed ``trader_id``, and the trading
    components of ``trading.parts``; the instrument provider loads only the
    held instruments, and the strategy requests a target's instrument at
@@ -31,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import exchange_calendars
+import nautilus_trader
 import pandas as pd
 from nautilus_trader.common import DataActor, DataActorConfig, Environment, LoggerConfig, LogLevel
 from nautilus_trader.infrastructure import RedisCacheConfig
@@ -119,7 +123,13 @@ def run_node(
 def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker, write, state_started) -> records.StepReport:
     config = load_config(live_dir)
     profile = broker or config.profile()
-    refusals = start_refusals(profile, account_id=config.ib_account, port=config.gateway_port)
+    def refusals_of(reported=None) -> list[str]:
+        return start_refusals(
+            profile, account_id=config.ib_account, port=config.gateway_port, reported=reported,
+            version=nautilus_trader.__version__, switches=config.switches(),
+        )
+
+    refusals = refusals_of()
     if refusals:
         return write(error="the start is refused: " + "; ".join(refusals))
     session = Session.on(date)
@@ -149,6 +159,7 @@ def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker
         LiveNode.builder("QUANTLAB-LIVE", TraderId(config.node_trader_id), environment)
         .with_logging(LoggerConfig(stdout_level=LogLevel.INFO))
         .with_reconciliation(not simulated)
+        .with_risk_engine_config(config.risk_engine_config(security_map.ids()))
     )
     if config.redis:
         builder = builder.with_cache_database_factory(RedisCacheConfig(host=config.redis_host, port=config.redis_port))
@@ -165,7 +176,7 @@ def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker
 
     def check(cache) -> str | None:
         reported = [str(a) for a in accounts if cache.account(a) is not None]
-        refusals = start_refusals(profile, account_id=config.ib_account, port=config.gateway_port, reported=reported)
+        refusals = refusals_of(reported)
         if refusals:
             return "the start is refused: " + "; ".join(refusals)
         write(started=True)

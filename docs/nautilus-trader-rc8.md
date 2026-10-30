@@ -132,3 +132,7 @@ Each entry gives the limitation, the workaround and where it lives, and how to c
 36. **The Python cache cannot be seeded.** A node's Python `Cache` has no `add_instrument` and no account listing.
     - Workaround: the in-process node tests serve instruments from a Python data client (`tests/fake_broker.py`), and the start check looks up the configured account by its id (`live/node.py`).
     - Check: the methods of `nautilus_trader.common.Cache`.
+
+37. **The notional cap is per instrument.** `LiveRiskEngineConfig.max_notional_per_order` maps an instrument id to a cap (in its quote currency); there is no cap for every instrument, and an instrument it does not name is not capped. Its order submit rate defaults to 100 a second.
+    - Workaround: `live.toml`'s `max_notional_per_order` is set on every instrument of the day's security map, the only instruments the strategy trades, and its `max_order_submit_rate` is passed only when set; a real-money start needs both (`live/config.py`, `live/node.py`, `live/guards.py`).
+    - Check: the parameters of `LiveRiskEngineConfig`; the `ib_sandbox` smoke test's capped node (`tests/test_ib_sandbox.py`) sends nothing above the cap.

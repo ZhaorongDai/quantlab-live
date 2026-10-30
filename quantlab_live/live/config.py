@@ -2,8 +2,10 @@
 
 The keys an operator sets are ``run`` (the quantlab run, relative to the live
 directory or absolute), ``initial_capital``, ``at``, ``order`` (with
-``band_bps`` for a limit plan), ``broker`` and ``real_money``. Every other
-key has a default, and ``status`` prints them all, so a default never hides.
+``band_bps`` for a limit plan), ``broker`` and ``real_money``, and for real
+money the risk engine's ``max_notional_per_order`` and
+``max_order_submit_rate``. Every other key has a default, and ``status``
+prints them all, so a default never hides.
 """
 
 from __future__ import annotations
@@ -15,8 +17,11 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from nautilus_trader.live import LiveRiskEngineConfig
+
 from quantlab_live import brokers
 from quantlab_live.brokers import BrokerProfile
+from quantlab_live.live.guards import ARMING_FILE, Switches, arming_state
 from quantlab_live.quantlab_gate import NUMA_NODE_1_CPUS
 from quantlab_live.trading.scheduled_execution import ExecutionPlan
 
@@ -40,7 +45,16 @@ class LiveConfig:
     broker : str, default ``"ibkr_paper"``
         The broker profile (``brokers.profile``).
     real_money : bool, default False
-        One of the two switches a real-money start needs.
+        One of the two switches a real-money start needs; the other is the
+        owner-only arming file ``real_money.armed`` in the live directory
+        (``guards.start_refusals``).
+    max_notional_per_order : float, optional
+        The risk engine's cap on one order's notional, in the instrument's
+        quote currency; it denies a larger order. Required for real money.
+    max_order_submit_rate : str, optional
+        The risk engine's order submit rate, such as ``"10/00:00:01"`` (ten
+        a second); NautilusTrader's default (100 a second) when unset.
+        Required for real money.
     account : str or pathlib.Path, optional
         The account history (``records.read_account_history``): one
         ``account.toml`` per account, shared by every live directory that
@@ -117,6 +131,8 @@ class LiveConfig:
     band_bps: float | None = None
     broker: str = "ibkr_paper"
     real_money: bool = False
+    max_notional_per_order: float | None = None
+    max_order_submit_rate: str | None = None
     account: str | Path | None = None
     after_open_minutes: int = 15
     open_cutoff_minutes: int = 10
@@ -153,6 +169,9 @@ class LiveConfig:
             raise ValueError(f"start_after must be 'HH:MM', not {self.start_after!r}")
         if self.redis_db != 0:
             raise ValueError("redis_db must be 0: NautilusTrader 2.0.0rc8 cannot select a Redis database")
+        if self.max_notional_per_order is not None and not self.max_notional_per_order > 0:
+            raise ValueError(f"max_notional_per_order must be positive, not {self.max_notional_per_order!r}")
+        self.risk_engine_config()  # validates the submit rate
 
     @property
     def plan(self) -> ExecutionPlan:
@@ -203,6 +222,40 @@ class LiveConfig:
             self.broker, host=self.gateway_host, port=self.gateway_port, client_id=self.client_id,
             account_id=self.ib_account, starting_cash=self.starting_cash,
         )
+
+    def switches(self) -> Switches:
+        """The real-money switches (``guards.Switches``), with the arming file's state read now."""
+        return Switches(
+            real_money=self.real_money, arming=arming_state(self.live_dir / ARMING_FILE),
+            initial_capital=self.initial_capital, max_notional_per_order=self.max_notional_per_order,
+            max_order_submit_rate=self.max_order_submit_rate, redis=self.redis,
+        )
+
+    def risk_engine_config(self, instrument_ids=()) -> LiveRiskEngineConfig:
+        """The node's risk engine: the submit rate, and the notional cap on each of ``instrument_ids``.
+
+        NautilusTrader caps the notional per instrument only, so the cap is
+        set on every instrument the node may trade (the security map's).
+
+        Examples
+        --------
+        >>> config = LiveConfig(run="run", max_notional_per_order=2_000.0, max_order_submit_rate="10/00:00:01")
+        >>> risk = config.risk_engine_config(["AAA=STK.SMART"])
+        >>> risk.max_order_submit_rate, risk.max_notional_per_order
+        ('10/00:00:01', {'AAA=STK.SMART': '2000'})
+        >>> LiveConfig(run="run", max_order_submit_rate="often")
+        Traceback (most recent call last):
+        ...
+        ValueError: max_order_submit_rate must be 'N/HH:MM:SS', not 'often'
+        """
+        if self.max_order_submit_rate is not None and not re.fullmatch(
+            r"[1-9]\d*/\d{2}:[0-5]\d:[0-5]\d", self.max_order_submit_rate
+        ):
+            raise ValueError(f"max_order_submit_rate must be 'N/HH:MM:SS', not {self.max_order_submit_rate!r}")
+        caps = {}
+        if self.max_notional_per_order is not None:
+            caps = {str(i): f"{self.max_notional_per_order:f}".rstrip("0").rstrip(".") for i in instrument_ids}
+        return LiveRiskEngineConfig(max_order_submit_rate=self.max_order_submit_rate, max_notional_per_order=caps)
 
     def effective(self) -> dict:
         """Every key with its effective value, defaults included, paths resolved.

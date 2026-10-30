@@ -17,6 +17,8 @@ sandbox fills its orders on IB's quotes. It checks:
 - the ``SMART`` venue loads (a held instrument at the start, the targets at
   runtime), IB's quotes stream and the sandbox fills on them, charging the
   IBKR fee model;
+- the risk engine denies an order above the notional cap, and lets one
+  below it through;
 - a node killed mid-day restarts from Redis, finds its working orders and
   submits nothing again;
 - a start on an account of the other mode is refused before any order;
@@ -121,7 +123,11 @@ def _soon() -> str:
 
 
 def test_the_smart_venue_loads_streams_and_fills_in_the_sandbox(tmp_path, run_dir):
-    live_dir = _live_dir(tmp_path, run_dir, "smoke", at=_soon(), min_node_seconds=240)
+    # The orders' notionals are about 50,000 each: inside the cap.
+    live_dir = _live_dir(
+        tmp_path, run_dir, "smoke", at=_soon(), min_node_seconds=240,
+        max_notional_per_order=1_000_000.0, max_order_submit_rate="10/00:00:01",
+    )
     today = _today()
     # Yesterday's snapshot holds KO: its instrument loads at the start; AAPL and MSFT at runtime.
     held = pd.DataFrame({"quantity": [5.0]}, index=pd.Index([C], name="symbol"))
@@ -134,6 +140,18 @@ def test_the_smart_venue_loads_streams_and_fills_in_the_sandbox(tmp_path, run_di
     assert set(outcomes.index) == {A, B}
     assert (outcomes["status"] == "filled").all(), outcomes
     assert (outcomes["avg_px"] > 0).all() and (outcomes["fees"] >= 1.0).all()  # IBKR's minimum per order
+
+
+def test_the_risk_engine_denies_an_order_above_the_notional_cap(tmp_path, run_dir):
+    live_dir = _live_dir(tmp_path, run_dir, "capped", at=_soon(), min_node_seconds=240, max_notional_per_order=1_000.0)
+    today = _today()
+
+    report = run_node(live_dir, today)
+
+    assert report.started and report.finished and report.error is None, report
+    outcomes = records.read_outcomes(live_dir, decision_bar_of(today))
+    assert (outcomes["status"] == "not_sent").all(), outcomes
+    assert (outcomes["filled_quantity"] == 0).all()
 
 
 @pytest.mark.skipif(REDIS is None, reason="QUANTLAB_LIVE_REDIS names no Redis")

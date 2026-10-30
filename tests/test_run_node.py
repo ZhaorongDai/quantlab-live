@@ -10,6 +10,7 @@ test's (``tests/test_ib_sandbox.py``).
 
 from __future__ import annotations
 
+import nautilus_trader
 import pandas as pd
 import pytest
 from quantlab.portfolio.config import TopkDropoutConfig
@@ -19,6 +20,7 @@ from quantlab.runs.prediction_panel import LabelSpec
 from quantlab_live import records
 from quantlab_live.cli import main
 from quantlab_live.live import run_node
+from quantlab_live.live.guards import ARMING_FILE
 from quantlab_live.live.node import DRY_RUN_DIR
 from tests.fake_broker import fake_profile
 from tests.quantlab_run_fixture import build_constructor_run
@@ -154,3 +156,33 @@ def test_the_command_line_runs_the_node_and_it_writes_its_step_report(live_dir, 
 
     report = records.read_step_report(live_dir / "steps" / DATE.date().isoformat() / "manual-trade.json")
     assert not report.started and "is live" in report.error
+
+
+@pytest.mark.skipif(nautilus_trader.__version__.replace(".", "").isdigit(), reason="NautilusTrader is a final release")
+def test_a_real_money_start_on_a_release_candidate_is_refused_before_the_node_is_built(live_dir, run_dir):
+    (live_dir / "live.toml").write_text(
+        f'run = "{run_dir}"\nbroker = "ibkr_real"\naccount_id = "U1234567"\ngateway_port = 4001\n'
+        'real_money = true\ninitial_capital = 10000\n'
+        'max_notional_per_order = 2000\nmax_order_submit_rate = "10/00:00:01"\n'
+    )
+    (live_dir / ARMING_FILE).write_text("")
+    (live_dir / ARMING_FILE).chmod(0o600)
+    report = run_node(live_dir, DATE)
+
+    assert not report.started
+    assert report.error == (
+        "the start is refused: a real-money start needs a final NautilusTrader release, "
+        f"and {nautilus_trader.__version__} is not a final release"
+    )
+    assert not (live_dir / records.SECURITY_MAP).exists()
+
+
+def test_a_real_money_start_without_its_arming_file_is_refused(live_dir, run_dir):
+    (live_dir / "live.toml").write_text(
+        f'run = "{run_dir}"\nbroker = "ibkr_real"\naccount_id = "U1234567"\ngateway_port = 4001\nreal_money = true\n'
+    )
+    report = run_node(live_dir, DATE)
+
+    assert not report.started
+    assert "the arming file is missing" in report.error
+    assert "initial_capital is not set" in report.error
