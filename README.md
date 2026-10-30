@@ -21,6 +21,9 @@ projects/
   quantlab-live/   this repository
 ```
 
+Until quantlab's changes for this repository reach its `main`, the quantlab checkout is on its
+branch `quantlab-live-support` (CI checks out the same branch).
+
 ```
 uv sync
 uv run pytest -n auto
@@ -30,7 +33,7 @@ Public functions carry NumPy docstrings with an Examples section; the examples r
 
 ## Layout
 
-- `quantlab_live/quantlab_gate.py`: the only module that imports quantlab (an exact allowlist, enforced by a test).
+- `quantlab_live/quantlab_gate.py`: the only module that imports quantlab (an exact allowlist, enforced by a test). `open_run(run_dir)` reads a run in-process (decision bars, target inputs, listings); `prepare_day(run_dir, date, store=...)` waits for quantlab's daily data update and runs quantlab's live prediction job, bound to NUMA node 1 with `taskset`.
 - `quantlab_live/trading/`: NautilusTrader extension classes, the same live and in replay: `DecisionBar` (one decision bar's quantlab inputs as custom data), `QuantlabStrategy`, its target sources and the `ScheduledExecution` execution algorithm.
 - `quantlab_live/records.py`: the repository's own records (decisions, outcomes, snapshots, equity), typed parquet in raw units.
 - `quantlab_live/replay.py`: `replay(run_dir, loop="open")` trades a quantlab run on NautilusTrader's `BacktestEngine` and writes the records and NautilusTrader's reports.

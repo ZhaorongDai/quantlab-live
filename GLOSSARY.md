@@ -19,3 +19,10 @@ A replay that executes a finished rebalance table; fills never feed back into de
 **Rebalance table**:
 Target portfolio weights per decision bar and symbol, finished by quantlab.
 _Avoid_: signal file, order list
+
+**Listing**:
+A symbol's ticker and primary exchange as of a date, as quantlab records them; what a broker's instrument id is built from.
+_Avoid_: contract (the broker's), name (quantlab's display name)
+
+**Live prediction store**:
+quantlab's append-only store of a run's predictions past its end, one bar per live day, written by quantlab's prediction job.

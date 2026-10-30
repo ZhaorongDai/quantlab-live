@@ -21,6 +21,19 @@ What the rule read while deciding (its factors, a risk model's exposures and
 estimate) is recorded under the backtester's component paths and added to the
 run's ``data_fingerprint``, as quantlab's ``run()`` records it.
 
+``build_quantlab_run(..., listings=...)`` puts the store behind a
+``SharadarStockDataset`` instead and writes the ticker sidecar quantlab's
+Sharadar conversion writes beside it (each permaticker's tickers and current
+exchange over time), so the run's price dataset lists its symbols.
+
+``build_model_run`` builds a run with a model, which quantlab's live
+prediction job can predict past the run's end: a one-factor
+``LinearRegressor`` trained on the store's first bars and backtested with a
+top-N rule. Its store holds back the market's last bars;
+``ModelRun.vendor_update`` appends the next one, as the daily data update
+does. The factor is ``PastReturn``, defined here, so a process rebuilding the
+run must import this module (a test puts the repository on ``PYTHONPATH``).
+
 Later tickets extend the fixture by passing their own raw prices and
 variables (``variables=``: a split, a dividend, a halt, a delisting) and
 their own table (``weights=``); ``adjusted_scale`` keeps the adjusted group a
@@ -33,14 +46,26 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
+import polars as pl
 import xarray as xr
 
 from quantlab.backtest.predefined.us_equity import USEquityCrossectionSelectStockVectorBt
 from quantlab.backtest.predefined.weights import WeightsVectorBt
 from quantlab.backtest.config import CrossSectionBacktestConfig, WeightsBacktestConfig
-from quantlab.dataset.config import CrspDatasetConfig
+from quantlab.dataset.config import CrspDatasetConfig, SharadarDatasetConfig
+from quantlab.dataset.sharadar.stock import SharadarStockDataset
+from quantlab.factor.config import PolarsFactorConfig
+from quantlab.factor.polars import FactorPolars
+from quantlab.label.config import ForwardConfig
+from quantlab.label.forward import Forward
+from quantlab.model.config import ModelConfig
+from quantlab.model.predefined.linear import LinearRegressor
+from quantlab.portfolio.config import TopNConfig
+from quantlab.portfolio.predefined.top_n import TopNConstructor
 from quantlab.portfolio.base import PortfolioConstructor
 from quantlab.runs.prediction_panel import LabelSpec, PredictionPanel
 from quantlab.tracking.base import Tracker
@@ -125,6 +150,7 @@ def build_quantlab_run(
     drop_variables: Sequence[str] = (),
     benchmark: tuple[Mapping[int, Sequence[float]], Mapping[int, Sequence[float]]] | None = None,
     tracker: Tracker | None = None,
+    listings: Mapping[int, Sequence[tuple[str | None, str, str | None]]] | None = None,
 ) -> Path:
     """Write a CRSP-shaped store and a quantlab weights run on it; return the run dir.
 
@@ -132,11 +158,16 @@ def build_quantlab_run(
     the holding); every PERMNO of ``close`` must be in it. ``benchmark`` is
     the raw ``(open, close)`` of one PERMNO, written to its own store and
     bought and held by the run; ``tracker`` is the run's tracker.
+    ``listings`` gives each permaticker's ``(start, ticker, exchange)`` spans
+    (``start`` the first day, ``None`` for the first span): the store is then
+    read as a Sharadar store with that ticker sidecar.
     """
     root = Path(root)
     dataset = _crsp_dataset(
         root, bars, open_, close, variables=variables, drop_variables=drop_variables
     )
+    if listings is not None:
+        dataset = _sharadar_dataset(dataset, listings)
     start, end = (b.strftime("%Y-%m-%d") for b in (bars[0], bars[-1]))
     permnos = sorted(close)
     table = xr.DataArray(
@@ -181,6 +212,139 @@ def _crsp_dataset(root: Path, bars, open_, close, **store) -> CrspStockDataset:
             end_date=bars[-1].strftime("%Y-%m-%d"),
         )
     )
+
+
+def _sharadar_dataset(crsp: CrspStockDataset, listings) -> SharadarStockDataset:
+    """Return a ``SharadarStockDataset`` over ``crsp``'s store, with its ticker sidecar written.
+
+    The sidecar is the file quantlab's conversion writes beside a Sharadar
+    store (``quantlab.dataset.sharadar.tickers``); a test stand-in for one
+    built from the vendor's tables.
+    """
+    dataset = SharadarStockDataset(
+        SharadarDatasetConfig(
+            zarr_file_path=crsp.config.zarr_file_path,
+            raw_data_dir_path=str(Path(crsp.config.zarr_file_path).parent / "sharadar"),
+        )
+    )
+    intervals = {
+        str(permaticker): [
+            {"start": start, "ticker": ticker, "company": None, "exchange": exchange}
+            for start, ticker, exchange in spans
+        ]
+        for permaticker, spans in listings.items()
+    }
+    dataset.ticker_sidecar_path().write_text(
+        json.dumps({"table": "sep", "intervals": intervals, "former": {}})
+    )
+    return dataset
+
+
+class PastReturn(FactorPolars):
+    """``past_ret_{n}``: the adjusted close over the one ``n`` bars earlier, less one."""
+
+    def _get_factor_lazyframe(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        n = int(self.config.kwargs["n"])
+        name = f"past_ret_{n}"
+        close = pl.col("adjClose")
+        return (
+            lf.sort(["symbol", "timestamp"])
+            .with_columns((close / close.shift(n).over("symbol") - 1.0).alias(name))
+            .select(["timestamp", "symbol", name])
+        )
+
+
+@dataclass
+class ModelRun:
+    """A quantlab run with a model, over a store that holds back the market's last bars.
+
+    Attributes
+    ----------
+    run_dir : Path
+        The run directory.
+    store : Path
+        The run's price store.
+    held_back : xarray.Dataset
+        The bars not yet in the store, in order.
+    """
+
+    run_dir: Path
+    store: Path
+    held_back: xr.Dataset
+
+    def vendor_update(self) -> pd.Timestamp:
+        """Append the next held-back bar to the store, as the data update does; return it."""
+        bar, self.held_back = self.held_back.isel(timestamp=[0]), self.held_back.isel(timestamp=slice(1, None))
+        bar.to_zarr(self.store, mode="a", append_dim="timestamp")
+        return pd.Timestamp(bar["timestamp"].values[0])
+
+
+def build_model_run(
+    root: Path,
+    bars: pd.DatetimeIndex,
+    open_: Mapping[int, Sequence[float]],
+    close: Mapping[int, Sequence[float]],
+    *,
+    held_back: int = 1,
+    train_bars: int = 20,
+    test_bars: int = 5,
+) -> ModelRun:
+    """Write a store of ``bars`` less the last ``held_back`` and a model run on it.
+
+    A ``LinearRegressor`` on one ``PastReturn`` factor (its store built
+    over the store's bars) learns the next bar's past return over the first
+    ``train_bars`` bars, is tested on the next ``test_bars``, and a top-2 rule
+    is backtested with its checkpoint over the store's remaining bars.
+    """
+    root = Path(root)
+    full = root / "market.zarr"
+    write_crsp_store(full, bars, open_, close)
+    market = xr.open_zarr(full).load()
+    stored = bars[: len(bars) - held_back]
+    dataset = _crsp_dataset(
+        root, stored,
+        {p: v[: len(stored)] for p, v in open_.items()},
+        {p: v[: len(stored)] for p, v in close.items()},
+    )
+    day = lambda i: stored[i].strftime("%Y-%m-%d")  # noqa: E731
+
+    def factor() -> PastReturn:
+        return PastReturn(PolarsFactorConfig(
+            warmup_bars=3, dataset=dataset, kwargs={"n": 3}, file_path=str(root / "past_ret.zarr"),
+        ))
+
+    def model(save_dir: Path) -> LinearRegressor:
+        label = Forward(ForwardConfig(
+            factor=PastReturn(PolarsFactorConfig(warmup_bars=1, dataset=dataset, kwargs={"n": 1})),
+            span=1, delay=1,
+        ))
+        last_test = train_bars + test_bars - 1
+        return LinearRegressor(ModelConfig(
+            factors=[factor()], labels=[label], model_save_dir=str(save_dir),
+            factor_data_strategy="read", label_data_strategy="cal",
+            start_date=day(0), end_date=day(last_test), val_size=0.0,
+            train_start=day(0), train_end=day(train_bars - 1),
+            test_start=day(train_bars), test_end=day(last_test),
+        ))
+
+    factor().build(day(0), day(len(stored) - 1))
+    trained = model(root / "train").collect()
+    checkpoint = trained.train()
+    backtester = USEquityCrossectionSelectStockVectorBt(
+        CrossSectionBacktestConfig(
+            price_dataset=dataset,
+            model=model(root / "run_model"),
+            model_mode="load",
+            checkpoint=str(checkpoint),
+            start_date=day(train_bars + test_bars),
+            end_date=day(len(stored) - 1),
+            output_dir=str(root / "runs"),
+            rebalance_periods=1,
+            constructor=TopNConstructor(TopNConfig(direction="long_only", top_n=2)),
+        )
+    )
+    run_dir = Path(backtester.run().run_dir)
+    return ModelRun(run_dir, Path(dataset.config.zarr_file_path), market.isel(timestamp=slice(len(stored), None)))
 
 
 def build_constructor_run(

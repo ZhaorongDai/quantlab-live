@@ -131,3 +131,29 @@ def test_only_the_gate_imports_quantlab_and_only_its_allowlist():
     assert set(found) == {Path(quantlab_gate.__file__)}
     allowed = {(module, name) for module, names in quantlab_gate.QUANTLAB_IMPORTS.items() for name in names}
     assert found[Path(quantlab_gate.__file__)] == allowed
+
+
+def test_listings_give_the_ticker_and_primary_exchange_as_of_a_date(tmp_path):
+    open_, close = _market()
+    renamed = BARS[3]
+    listings = {
+        10001: [(None, "FB", None), (renamed.strftime("%Y-%m-%d"), "META", "NASDAQ")],
+        10002: [(None, "BRK.B", "NYSE")],
+    }
+    weights = {p: [1 / len(PERMNOS)] + [np.nan] * (len(BARS) - 1) for p in PERMNOS}
+    run = open_run(build_quantlab_run(tmp_path, BARS, open_, close, weights, listings=listings))
+
+    on_the_day = run.listings(renamed)
+    assert on_the_day.to_dict("index") == {
+        10001: {"ticker": "META", "exchange": "NASDAQ"},
+        10002: {"ticker": "BRK.B", "exchange": "NYSE"},
+        10003: {"ticker": None, "exchange": None},  # quantlab cannot place it
+    }
+    before = run.listings(BARS[2], symbols=[10001])
+    assert before.loc[10001].tolist() == ["FB", None]
+
+
+def test_listings_need_a_price_dataset_that_lists_its_symbols(closed_run):
+    run_dir, _ = closed_run  # a CRSP store: quantlab names its tickers but records no exchanges
+    with pytest.raises(NotImplementedError, match="records no listings"):
+        open_run(run_dir).listings(BARS[0])

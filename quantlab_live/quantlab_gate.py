@@ -6,34 +6,60 @@ allowlist; a test fails when any other module imports quantlab or when this
 one imports anything else from it.
 
 ``open_run`` serves the node and replay with in-process reads of a quantlab
-backtest run: its decision bars (``DecisionBar``) and the raw inputs of its
-targets.
+backtest run: its decision bars (``DecisionBar``), the raw inputs of its
+targets and its symbols' listings.
+
+``prepare_day`` is the process-level contract of a live day: it reads the
+status file of quantlab's daily data update and runs quantlab's live
+prediction job as a subprocess bound to NUMA node 1. Run as a module
+(``python -m quantlab_live.quantlab_gate predict ...``), this file is that
+job.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import argparse
+import json
+import os
+import subprocess
+import sys
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+from quantlab.config import get_data_root
 from quantlab.dataset.base import MarketDataset
 from quantlab.portfolio.decision_inputs import DecisionInputs
 from quantlab.runs.backtest_run import BacktestRun, Market
+from quantlab.runs.live_predictions import LivePredictionStore
 
 from quantlab_live.trading.decision_bar import PREDICTION, DecisionBar
 
 #: The exact quantlab imports of quantlab-live: module -> names.
 QUANTLAB_IMPORTS: dict[str, tuple[str, ...]] = {
+    # The prediction job only, imported in its own process.
+    "quantlab.backtest.live": ("LivePredictionRefused", "predict_live_bar"),
+    "quantlab.config": ("get_data_root",),
     "quantlab.dataset.base": ("MarketDataset",),
     "quantlab.portfolio.decision_inputs": ("DecisionInputs",),
     "quantlab.runs.backtest_run": ("BacktestRun", "Market"),
+    "quantlab.runs.live_predictions": ("LivePredictionStore",),
 }
 
 #: Decimal places of a raw price mark (instrument price precision).
 PRICE_PRECISION = 4
+
+#: The cores of NUMA node 1 on the trading server, which every job is bound to.
+NUMA_NODE_1_CPUS = "64-127"
+
+#: quantlab's daily data update writes its outcome here, under the data root.
+UPDATE_STATUS_FILE = "update_status.json"
+
+#: Exit status of the prediction job per outcome (``python -m quantlab_live.quantlab_gate``).
+JOB_APPENDED, JOB_FAILED, JOB_MISSING_DATA, JOB_ALREADY_PREDICTED = 0, 1, 2, 3
 
 
 class QuantlabNotReady(LookupError):
@@ -202,7 +228,59 @@ class Run:
                 f"quantlab run {self.run_dir} is valued at raw prices; a closed loop "
                 f"decides on adjusted closes"
             )
-        return DecisionInputs.from_run(self.run_dir, end=None)
+        return DecisionInputs.from_run(self._backtest_run, end=None, price_dataset=self._dataset)
+
+    def listings(self, date, symbols=None) -> pd.DataFrame:
+        """Return the ticker and primary exchange of each symbol as of ``date``.
+
+        Read from the run's price dataset (a Sharadar store's ticker sidecar,
+        refreshed by every data update). The exchange is the vendor's name of
+        it (``NYSE``, ``NASDAQ``, ``NYSEMKT``, ``NYSEARCA``, ``BATS``). Either
+        is ``None`` when quantlab does not know it: a symbol it cannot place,
+        or a ticker the symbol had before its current one, whose exchange
+        the vendor does not keep.
+
+        Parameters
+        ----------
+        date : datetime-like
+            The day the listings hold on.
+        symbols : sequence, optional
+            The symbols to list; every symbol of the price dataset's store by
+            default.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Indexed by symbol, columns ``ticker`` and ``exchange``.
+
+        Raises
+        ------
+        ValueError
+            If the price dataset names no tickers.
+        NotImplementedError
+            If its ticker lookup records no listings (a CRSP store).
+        FileNotFoundError
+            If its ticker sidecar is missing.
+
+        Examples
+        --------
+        ::
+
+            run.listings("2026-10-29").loc[194817].tolist()  # ['META', 'NASDAQ']
+        """
+        lookup = self._dataset.ticker_lookup()
+        if lookup is None:
+            raise ValueError(
+                f"quantlab run {self.run_dir}: its price dataset "
+                f"{type(self._dataset).__name__} names no tickers"
+            )
+        symbols = list(self._dataset.stored_symbols() if symbols is None else symbols)
+        found = lookup.listings(symbols, pd.Timestamp(date).date())
+        return pd.DataFrame(
+            {"ticker": [x.ticker for x in found], "exchange": [x.exchange for x in found]},
+            index=pd.Index(symbols, name="symbol"),
+            dtype=object,
+        )
 
 
 def open_run(run_dir: str | Path) -> Run:
@@ -248,3 +326,172 @@ def _last_valuation(raw_close: pd.DataFrame, valuation: pd.DataFrame) -> pd.Data
     grown = raw_close.where(paired).ffill() * valuation / valuation.where(paired).ffill()
     value = grown.where(np.isfinite(grown) & (grown >= 0), last_close)
     return value.round(PRICE_PRECISION)
+
+
+@dataclass(frozen=True)
+class Ready:
+    """The day's bar is predicted: the live prediction store holds it.
+
+    Attributes
+    ----------
+    bar : pandas.Timestamp
+        The bar predicted, the last bar of the run's price dataset.
+
+    Examples
+    --------
+    >>> Ready(pd.Timestamp("2026-10-28"))
+    Ready(bar=Timestamp('2026-10-28 00:00:00'))
+    """
+
+    bar: pd.Timestamp
+
+
+@dataclass(frozen=True)
+class Pending:
+    """The day cannot be traded yet; ask again later.
+
+    Attributes
+    ----------
+    reason : str
+        Why, for the day's log and mail.
+
+    Examples
+    --------
+    >>> Pending("the data update is running").reason
+    'the data update is running'
+    """
+
+    reason: str
+
+
+class PredictionFailed(RuntimeError):
+    """quantlab's prediction job failed in a way polling again will not cure.
+
+    Examples
+    --------
+    >>> issubclass(PredictionFailed, RuntimeError)
+    True
+    """
+
+
+def prepare_day(
+    run_dir: str | Path,
+    date,
+    *,
+    store: str | Path,
+    data_root: str | Path | None = None,
+    may_lag: Iterable[str | Path] = (),
+    cpus: str = NUMA_NODE_1_CPUS,
+) -> Ready | Pending:
+    """Make the run's prediction of the day's bar, once quantlab's data is up to date.
+
+    ``Pending`` until quantlab's daily data update has written ``done`` for
+    ``date`` in ``<data_root>/update_status.json``. Then the bar is the last
+    bar of the run's price dataset: if the live prediction store already
+    holds it the day is ``Ready`` at once, and otherwise quantlab's
+    prediction job (``quantlab.backtest.live.predict_live_bar``) runs as a
+    subprocess under ``taskset -c <cpus>`` and appends it. The job is run
+    only while the bar is missing, so polling is safe and never predicts a
+    bar twice. Thread environment variables are passed through as they are.
+
+    Parameters
+    ----------
+    run_dir : str or pathlib.Path
+        The quantlab backtest run, with a model.
+    date : datetime-like
+        The New York trading day the update ran for.
+    store : str or pathlib.Path
+        The run's live prediction store; the first job creates it.
+    data_root : str or pathlib.Path, optional
+        quantlab's data root; quantlab's own (``QUANTLAB_DATA_DIR``) by
+        default. The job gets it as ``QUANTLAB_DATA_DIR``.
+    may_lag : iterable of path, optional
+        Stores the run reads that may end before the bar (a rate published
+        the next business day).
+    cpus : str, default ``NUMA_NODE_1_CPUS``
+        The ``taskset`` CPU list of the job.
+
+    Returns
+    -------
+    Ready or Pending
+        ``Pending`` also when the job finds an input lacking the bar.
+
+    Raises
+    ------
+    ValueError
+        If the store holds another run's or checkpoint's predictions, or the
+        run has no model.
+    PredictionFailed
+        If the job fails for another reason (its output is in the message).
+
+    Examples
+    --------
+    ::
+
+        while isinstance(day := prepare_day(run_dir, today, store=store), Pending):
+            log(day.reason)
+            sleep(15 * 60)
+    """
+    data_root = Path(get_data_root() if data_root is None else data_root)
+    status_path = data_root / UPDATE_STATUS_FILE
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return Pending(f"the data update's status {status_path} is unreadable: {error}")
+    day = pd.Timestamp(date).date().isoformat()
+    if status.get("date") != day or status.get("state") != "done":
+        return Pending(
+            f"the data update is not done for {day}: {status_path} says "
+            f"{status.get('state')!r} for {status.get('date')!r}"
+        )
+    run = open_run(run_dir)
+    bar = run._dataset.last_bar()
+    if bar is None:
+        return Pending(f"quantlab run {run.run_dir}: its price store holds no bar")
+    live = LivePredictionStore(store)
+    live.check_owner(run._backtest_run)
+    if live.has(bar):
+        return Ready(bar)
+    command = [
+        "taskset", "-c", cpus,
+        sys.executable, "-m", "quantlab_live.quantlab_gate", "predict", str(run.run_dir),
+        "--store", str(Path(store).absolute()),
+        *(arg for path in may_lag for arg in ("--may-lag", str(path))),
+    ]
+    env = {**os.environ, "QUANTLAB_DATA_DIR": str(data_root)}
+    done = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+    output = (done.stderr or done.stdout).strip()[-2000:]
+    if done.returncode == JOB_MISSING_DATA:
+        return Pending(f"the prediction job found data missing for {bar.date()}: {output}")
+    if done.returncode in (JOB_APPENDED, JOB_ALREADY_PREDICTED) and live.has(bar):
+        return Ready(bar)
+    raise PredictionFailed(
+        f"the prediction job of {run.run_dir} for {bar.date()} exited {done.returncode} "
+        f"without the bar in {store}: {output}"
+    )
+
+
+def _predict(argv: list[str] | None = None) -> int:
+    """Run quantlab's live prediction of a run's last bar; return the job's exit status."""
+    from quantlab.backtest.live import LivePredictionRefused, predict_live_bar
+
+    parser = argparse.ArgumentParser(prog="python -m quantlab_live.quantlab_gate predict")
+    parser.add_argument("run_dir", type=Path)
+    parser.add_argument("--store", type=Path, required=True)
+    parser.add_argument("--may-lag", type=Path, action="append", default=[])
+    args = parser.parse_args(argv)
+    try:
+        done = predict_live_bar(args.run_dir, args.store, may_lag=args.may_lag)
+    except LivePredictionRefused as refused:
+        print(f"refused ({refused.reason}): {refused}", file=sys.stderr)
+        return {"already_predicted": JOB_ALREADY_PREDICTED, "missing_data": JOB_MISSING_DATA}.get(
+            refused.reason, JOB_FAILED
+        )
+    print(f"predicted {done.timestamp.date()} into {done.store.path}")
+    return JOB_APPENDED
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["predict"]:
+        sys.exit("usage: python -m quantlab_live.quantlab_gate predict RUN_DIR --store STORE")
+    sys.exit(_predict(sys.argv[2:]))
