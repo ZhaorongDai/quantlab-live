@@ -9,8 +9,8 @@ real run directory (read through quantlab's ``BacktestRun``). Nothing here
 imports quantlab's ``tests/``. Test-only: the allowlist of
 ``quantlab_live.quantlab_gate`` covers the package, not the tests.
 
-``build_constructor_run`` builds a closed-loop run the way ADR 0007 has
-the parity fixtures built: a model-free ``PredictionPanel``, quantlab's
+``build_constructor_run`` builds a closed-loop run: a model-free
+``PredictionPanel``, quantlab's
 ``DecisionInputs.weights`` over it (the inputs quantlab's cross-section
 backtester assembles: tradability, the rebalance schedule, the rule's
 ``history_bars`` price window, the delisting marks), ``run_weights`` of a
