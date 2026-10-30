@@ -32,7 +32,7 @@ from __future__ import annotations
 import pandas as pd
 from nautilus_trader.model import OrderFilled, OrderPendingCancel, OrderSide
 
-from quantlab_live.trading.scheduled_execution import AUCTIONS, CHILD_TAG
+from quantlab_live.trading.scheduled_execution import AUCTION_CHILDREN, CHILD_TAG, Child
 
 #: The prefix of the order tag naming an order's decision bar.
 BAR_TAG = "bar="
@@ -189,7 +189,7 @@ def _status(row: pd.Series, orders: pd.DataFrame, filled: float, position: float
         return UNVERIFIED
     ended = sent[sent["status"].isin(_ENDED) & (sent["leaves"] > 0)]
     venue_ended = ended[~ended["cancel_requested"].astype(bool)]
-    if venue_ended["child"].isin(AUCTIONS).any() and (sent["child"] == "fallback").any():
+    if venue_ended["child"].isin(AUCTION_CHILDREN).any() and (sent["child"] == Child.FALLBACK).any():
         return VENUE_CANCELLED_FALLBACK
     if filled == quantity:
         return FILLED

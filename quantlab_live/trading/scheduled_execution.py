@@ -43,6 +43,8 @@ cannot price.
 
 from __future__ import annotations
 
+import dataclasses
+import enum
 import functools
 import re
 from collections.abc import Callable
@@ -204,23 +206,45 @@ class Session:
         return (day + pd.Timedelta(hours=hours, minutes=minutes)).tz_convert("UTC")
 
 
+class Child(enum.StrEnum):
+    """The kinds of child an order spawns; an order's ``child=`` tag names its kind.
+
+    Examples
+    --------
+    >>> Child("fallback"), Child.OPEN_AUCTION in AUCTION_CHILDREN
+    ('fallback', True)
+    """
+
+    OPEN_AUCTION = "open_auction"
+    CLOSE_AUCTION = "close_auction"
+    DAY = "day"
+    FALLBACK = "fallback"
+    NONE = "none"
+
+    __repr__ = str.__repr__
+
+
+#: The children that trade in an auction.
+AUCTION_CHILDREN = (Child.OPEN_AUCTION, Child.CLOSE_AUCTION)
+
+
 @dataclass(frozen=True)
 class Action:
     """What to do with an order.
 
     Attributes
     ----------
-    child : {"open_auction", "close_auction", "day", "fallback", "none"}
+    child : Child
         The child to send: one in an auction, a ``DAY`` order of the plan's
         type, a ``DAY`` market order falling back from the opening auction,
-        or nothing.
+        or nothing (``Child.NONE``).
     at : pandas.Timestamp or None
         When the child trades (an auction's print, or a time), UTC.
     reason : str
         Why nothing is sent.
     """
 
-    child: str
+    child: Child
     at: pd.Timestamp | None
     reason: str = ""
 
@@ -253,22 +277,66 @@ def action(now, plan: ExecutionPlan, session: Session, *, auction_missed: bool =
     if plan.at == "open_auction":
         cutoff = session.open - pd.Timedelta(minutes=plan.open_cutoff_minutes)
         if now <= cutoff and not auction_missed:
-            return Action("open_auction", session.open)
+            return Action(Child.OPEN_AUCTION, session.open)
         at = max(now, session.open + pd.Timedelta(minutes=plan.fallback_minutes))
         if at >= session.close:
-            return Action("none", None, "past the close; the opening auction's fallback is not sent")
-        return Action("fallback", at)
+            return Action(Child.NONE, None, "past the close; the opening auction's fallback is not sent")
+        return Action(Child.FALLBACK, at)
     if plan.at == "close_auction":
         if auction_missed:
-            return Action("none", None, "a closing auction has no fallback")
+            return Action(Child.NONE, None, "a closing auction has no fallback")
         if now <= session.close - pd.Timedelta(minutes=plan.close_cutoff_minutes):
-            return Action("close_auction", session.close)
-        return Action("none", None, "missed the closing auction's cut-off")
+            return Action(Child.CLOSE_AUCTION, session.close)
+        return Action(Child.NONE, None, "missed the closing auction's cut-off")
     at = session.at(plan.at)
     deadline = min(at + pd.Timedelta(minutes=plan.deadline_minutes), session.close)
     if now >= deadline or at >= session.close:
-        return Action("none", None, f"past the {plan.at} plan's deadline")
-    return Action("day", max(now, at))
+        return Action(Child.NONE, None, f"past the {plan.at} plan's deadline")
+    return Action(Child.DAY, max(now, at))
+
+
+@dataclass(frozen=True)
+class _Venue:
+    """How the children of one environment are sent.
+
+    ``auction_tif``: an auction child carries the auction time in force and
+    goes to the venue at once (live). ``simulated``: every child waits for
+    its print and is priced and expired as NautilusTrader's simulator needs
+    (backtest). The sandbox is neither: it rejects auction time in force, so
+    an auction child there is a ``DAY`` order sent at the auction's time.
+    """
+
+    auction_tif: bool
+    simulated: bool
+
+
+_VENUES = {
+    Environment.LIVE: _Venue(auction_tif=True, simulated=False),
+    Environment.SANDBOX: _Venue(auction_tif=False, simulated=False),
+    Environment.BACKTEST: _Venue(auction_tif=False, simulated=True),
+}
+
+
+@dataclass(frozen=True)
+class _Send:
+    """A child to send for a primary, as a time alert names it.
+
+    ``waited`` counts the seconds a live child has waited for a first price.
+    """
+
+    child: Child
+    primary: str
+    quantity: str
+    waited: int = 0
+
+    @property
+    def name(self) -> str:
+        return f"{self.child}:{self.primary}:{self.quantity}:{self.waited}"
+
+    @classmethod
+    def named(cls, name: str) -> _Send:
+        child, primary, quantity, waited = name.split(":")
+        return cls(Child(child), primary, quantity, int(waited))
 
 
 class ScheduledExecution(ExecutionAlgorithm):
@@ -314,18 +382,16 @@ class ScheduledExecution(ExecutionAlgorithm):
         self._plan = plan
         self._session = session
         self._alert = alert
-        self._backtest = environment == Environment.BACKTEST
-        # NautilusTrader's sandbox, like its simulator, rejects auction time in force.
-        self._sandbox = environment == Environment.SANDBOX
+        self._venue = _VENUES[environment]
 
     def on_order(self, order) -> None:
         now = self._now()
         todo = action(now, self._plan, self._session_at(now))
-        if todo.child == "none":
+        if todo.child == Child.NONE:
             self._warn(f"{order.instrument_id}: {order.side.name} {order.quantity} is not sent: {todo.reason}")
             self.deny_order(order, todo.reason)
             return
-        if todo.child == "fallback":
+        if todo.child == Child.FALLBACK:
             self._warn(
                 f"{order.instrument_id}: {order.side.name} {order.quantity} was ready after the opening auction's "
                 f"cut-off; it falls back to a DAY market order at {_ny(todo.at)} New York"
@@ -342,7 +408,7 @@ class ScheduledExecution(ExecutionAlgorithm):
         """Fall back from an auction child the venue ended without our request."""
         child = self.cache.order(event.client_order_id)
         kind = _child_kind(child)
-        if kind not in AUCTIONS or child.leaves_qty.as_double() == 0:
+        if kind not in AUCTION_CHILDREN or child.leaves_qty.as_double() == 0:
             return
         if any(isinstance(e, OrderPendingCancel) for e in child.events()):
             return  # we asked for it
@@ -350,85 +416,82 @@ class ScheduledExecution(ExecutionAlgorithm):
         todo = action(now, self._plan, self._session_at(now), auction_missed=True)
         primary = self.cache.order(child.exec_spawn_id)
         what = f"{child.instrument_id}: the venue ended the {kind} order {child.client_order_id} with {child.leaves_qty} unfilled"
-        if todo.child == "none":
+        if todo.child == Child.NONE:
             self._warn(f"{what} ({todo.reason}); it is venue_cancelled")
             return
         self._warn(f"{what}; the remainder falls back to a DAY market order at {_ny(todo.at)} New York")
         self._schedule(primary, todo, child.leaves_qty)
 
     def _schedule(self, primary, todo: Action, quantity: Quantity) -> None:
-        if not self._backtest and not self._sandbox and todo.child in AUCTIONS:
-            self._send_live(primary, todo.child, quantity, 0)
+        send = _Send(todo.child, primary.client_order_id.value, str(quantity))
+        if self._venue.auction_tif and todo.child in AUCTION_CHILDREN:
+            self._send_live(send)
             return
-        name = f"{todo.child}:{primary.client_order_id.value}:{quantity}"
-        self.clock.set_time_alert_ns(name, todo.at.value, self._on_alert, allow_past=True)
+        self.clock.set_time_alert_ns(send.name, todo.at.value, self._on_alert, allow_past=True)
 
-    def _send_live(self, primary, kind: str, quantity: Quantity, waited: int) -> None:
+    def _send_live(self, send: _Send) -> None:
         """Submit a live child once its instrument has a price, waiting at most ``PRICE_WAIT_SECONDS``.
 
         NautilusTrader's risk engine denies a market order on an instrument
         without a quote or trade in the cache, which a node just started, or
         an instrument just loaded, may not have yet.
         """
+        primary = self.cache.order(ClientOrderId(send.primary))
         instrument_id = primary.instrument_id
         priced = self.cache.quote(instrument_id) is not None or self.cache.trade(instrument_id) is not None
-        if priced or waited >= PRICE_WAIT_SECONDS:
+        if priced or send.waited >= PRICE_WAIT_SECONDS:
             if not priced:
-                self.log.warning(f"{instrument_id} has no price after {waited} s; sending {kind} anyway")
-            self._submit(primary, kind, quantity, last_print=None)
+                self.log.warning(f"{instrument_id} has no price after {send.waited} s; sending {send.child} anyway")
+            self._submit(primary, send.child, Quantity.from_str(send.quantity), last_print=None)
             return
-        name = f"{kind}:{primary.client_order_id.value}:{quantity}:{waited + 1}"
-        self.clock.set_time_alert_ns(name, self.clock.timestamp_ns() + 1_000_000_000, self._on_alert)
+        later = dataclasses.replace(send, waited=send.waited + 1)
+        self.clock.set_time_alert_ns(later.name, self.clock.timestamp_ns() + 1_000_000_000, self._on_alert)
 
     def _on_alert(self, event) -> None:
-        kind, primary_id, quantity, *waited = event.name.split(":")
-        primary = self.cache.order(ClientOrderId(primary_id))
-        if not self._backtest:
-            self._send_live(primary, kind, Quantity.from_str(quantity), int(waited[0]) if waited else 0)
+        send = _Send.named(event.name)
+        if not self._venue.simulated:
+            self._send_live(send)
             return
-        last_print = None
-        if self._backtest:
-            last = self.cache.trade(primary.instrument_id)
-            if last is None or last.ts_event != event.ts_event:
-                reason = f"{primary.instrument_id} has no print at {pd.Timestamp(event.ts_event, tz='UTC')}"
-                if kind == "fallback":
-                    self.log.warning(f"{reason}; the fallback of {primary_id} is not sent")
-                else:
-                    self.deny_order(primary, reason)
-                return
-            last_print = last.price
-        self._submit(primary, kind, Quantity.from_str(quantity), last_print)
+        primary = self.cache.order(ClientOrderId(send.primary))
+        last = self.cache.trade(primary.instrument_id)
+        if last is None or last.ts_event != event.ts_event:
+            reason = f"{primary.instrument_id} has no print at {pd.Timestamp(event.ts_event, tz='UTC')}"
+            if send.child == Child.FALLBACK:
+                self.log.warning(f"{reason}; the fallback of {send.primary} is not sent")
+            else:
+                self.deny_order(primary, reason)
+            return
+        self._submit(primary, send.child, Quantity.from_str(send.quantity), last.price)
 
-    def _submit(self, primary, kind: str, quantity: Quantity, last_print: Price | None) -> None:
+    def _submit(self, primary, kind: Child, quantity: Quantity, last_print: Price | None) -> None:
         """Spawn and submit a ``kind`` child; ``last_print`` is a backtest's print."""
         tags = [*(primary.tags or []), CHILD_TAG + kind]
-        reduce = kind != "fallback"  # a fallback takes the remainder of a child
-        limit = self._plan.order == "limit" and kind != "fallback"
+        reduce = kind != Child.FALLBACK  # a fallback takes the remainder of a child
+        limit = self._plan.order == "limit" and kind != Child.FALLBACK
         price = self._limit_price(primary) if limit else None
-        if kind in AUCTIONS and not self._sandbox:
-            if self._backtest:
-                expire = pd.Timestamp(self.clock.timestamp_ns(), tz="UTC") + AUCTION_LIFE
-                child = self.spawn_limit(
-                    primary, quantity, price or last_print, TimeInForce.GTD,
-                    expire_time=expire.to_pydatetime(), tags=tags, reduce_primary=reduce,
-                )
-            else:
-                tif = TimeInForce.AT_THE_OPEN if kind == "open_auction" else TimeInForce.AT_THE_CLOSE
-                child = (
-                    self.spawn_limit(primary, quantity, price, tif, tags=tags, reduce_primary=reduce)
-                    if limit
-                    else self.spawn_market(primary, quantity, tif, tags=tags, reduce_primary=reduce)
-                )
+        auction = kind in AUCTION_CHILDREN
+        if auction and self._venue.simulated:
+            expire = self._now() + AUCTION_LIFE
+            child = self.spawn_limit(
+                primary, quantity, price or last_print, TimeInForce.GTD,
+                expire_time=expire.to_pydatetime(), tags=tags, reduce_primary=reduce,
+            )
+        elif auction and self._venue.auction_tif:
+            tif = TimeInForce.AT_THE_OPEN if kind == Child.OPEN_AUCTION else TimeInForce.AT_THE_CLOSE
+            child = (
+                self.spawn_limit(primary, quantity, price, tif, tags=tags, reduce_primary=reduce)
+                if limit
+                else self.spawn_market(primary, quantity, tif, tags=tags, reduce_primary=reduce)
+            )
+        elif limit and self._venue.simulated:
+            # The simulator never expires a DAY order; this one expires at the close.
+            close = self._session_at(self._now()).close
+            child = self.spawn_limit(
+                primary, quantity, price, TimeInForce.GTD, expire_time=close.to_pydatetime(),
+                tags=tags, reduce_primary=reduce,
+            )
         elif limit:
-            if self._backtest:
-                # The simulator never expires a DAY order; this one expires at the close.
-                close = self._session_at(self._now()).close
-                child = self.spawn_limit(
-                    primary, quantity, price, TimeInForce.GTD, expire_time=close.to_pydatetime(),
-                    tags=tags, reduce_primary=reduce,
-                )
-            else:
-                child = self.spawn_limit(primary, quantity, price, TimeInForce.DAY, tags=tags, reduce_primary=reduce)
+            child = self.spawn_limit(primary, quantity, price, TimeInForce.DAY, tags=tags, reduce_primary=reduce)
         else:
             child = self.spawn_market(primary, quantity, TimeInForce.DAY, tags=tags, reduce_primary=reduce)
         self.submit_order(child)
@@ -455,7 +518,7 @@ def _ny(t: pd.Timestamp) -> str:
     return pd.Timestamp(t).tz_convert(NEW_YORK).strftime("%H:%M")
 
 
-def _child_kind(order) -> str | None:
+def _child_kind(order) -> Child | None:
     """The kind of child an order is (its ``child=`` tag); ``None`` for a primary."""
     tags = [t for t in order.tags or [] if t.startswith(CHILD_TAG)]
-    return tags[0].removeprefix(CHILD_TAG) if tags else None
+    return Child(tags[0].removeprefix(CHILD_TAG)) if tags else None
