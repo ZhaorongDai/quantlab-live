@@ -10,6 +10,8 @@ test's (``tests/test_ib_sandbox.py``).
 
 from __future__ import annotations
 
+import time
+
 import nautilus_trader
 import pandas as pd
 import pytest
@@ -52,14 +54,14 @@ def live_dir(tmp_path, run_dir):
     live_dir = tmp_path / "paper"
     live_dir.mkdir()
     (live_dir / "live.toml").write_text(
-        f'run = "{run_dir}"\nbroker = "ib_sandbox"\nredis = false\nmin_node_seconds = 3\n'
+        f'run = "{run_dir}"\nbroker = "ib_sandbox"\nmin_node_seconds = 3\n'
     )
     return live_dir
 
 
 def test_a_node_decides_after_start_up_trades_and_writes_outcomes_and_the_snapshot(live_dir):
     profile, requested = fake_profile(PRICES)
-    report = run_node(live_dir, DATE, broker=profile)
+    report = run_node(live_dir, DATE, broker=profile, redis=False)
 
     assert report == records.StepReport("trade", started=True, finished=True, outcomes=True, alerts=report.alerts)
     assert report.error is None
@@ -81,7 +83,7 @@ def test_a_node_decides_after_start_up_trades_and_writes_outcomes_and_the_snapsh
 
 def test_a_dry_run_writes_the_decision_and_the_planned_orders_and_submits_nothing(live_dir):
     profile, requested = fake_profile(PRICES)
-    report = run_node(live_dir, DATE, dry_run=True, broker=profile)
+    report = run_node(live_dir, DATE, dry_run=True, broker=profile, redis=False)
 
     assert (report.started, report.finished, report.error) == (True, True, None)
     assert not records.has_decision(live_dir, BAR)  # the live records are untouched
@@ -96,7 +98,7 @@ def test_a_dry_run_writes_the_decision_and_the_planned_orders_and_submits_nothin
 
 def test_a_start_on_an_account_of_the_other_mode_is_refused_before_the_node_is_built(live_dir, run_dir):
     (live_dir / "live.toml").write_text(
-        f'run = "{run_dir}"\nbroker = "ibkr_paper"\naccount_id = "U1234567"\ngateway_port = 4002\nredis = false\n'
+        f'run = "{run_dir}"\nbroker = "ibkr_paper"\naccount_id = "U1234567"\ngateway_port = 4002\n'
     )
     report = run_node(live_dir, DATE)
 
@@ -109,7 +111,7 @@ def test_a_start_on_an_account_of_the_other_mode_is_refused_before_the_node_is_b
 def test_a_start_whose_account_the_broker_does_not_report_is_refused_before_any_order(live_dir):
     (live_dir / "live.toml").write_text((live_dir / "live.toml").read_text() + 'account_id = "DU1234567"\n')
     profile, requested = fake_profile(PRICES, account_id="IB-DU1234567")
-    report = run_node(live_dir, DATE, broker=profile)
+    report = run_node(live_dir, DATE, broker=profile, redis=False)
 
     assert not report.started
     assert "the broker reported accounts none, not DU1234567" in report.error
@@ -118,22 +120,26 @@ def test_a_start_whose_account_the_broker_does_not_report_is_refused_before_any_
 
 
 def test_a_restarted_node_resumes_the_decision_it_finds_without_deciding_again(live_dir):
-    run_node(live_dir, DATE, broker=fake_profile(PRICES)[0])
+    run_node(live_dir, DATE, broker=fake_profile(PRICES)[0], redis=False)
     path = live_dir / records.DECISIONS / f"{BAR.date()}.parquet"
     written = path.read_bytes()
 
-    report = run_node(live_dir, DATE, broker=fake_profile(PRICES)[0])
+    report = run_node(live_dir, DATE, broker=fake_profile(PRICES)[0], redis=False)
 
     assert (report.started, report.finished, report.error) == (True, True, None)
     assert path.read_bytes() == written
 
 
-def test_a_settle_only_node_trades_nothing_and_writes_the_outcomes(live_dir):
-    run_node(live_dir, DATE, dry_run=False, broker=fake_profile(PRICES)[0])
+def test_a_settle_only_node_trades_nothing_stops_once_reconciled_and_writes_the_outcomes(live_dir):
+    run_node(live_dir, DATE, dry_run=False, broker=fake_profile(PRICES)[0], redis=False)
     (live_dir / records.OUTCOMES / f"{BAR.date()}.parquet").unlink()
     profile, requested = fake_profile(PRICES)
+    (live_dir / "live.toml").write_text((live_dir / "live.toml").read_text().replace("min_node_seconds = 3", "min_node_seconds = 120"))
 
-    report = run_node(live_dir, DATE, settle=True, broker=profile)
+    started = time.monotonic()
+    report = run_node(live_dir, DATE, settle=True, broker=profile, redis=False)
+
+    assert time.monotonic() - started < 60  # it did not wait for min_node_seconds
 
     assert report == records.StepReport("settle", started=True, finished=True, outcomes=True, alerts=report.alerts)
     assert requested == []
@@ -143,14 +149,14 @@ def test_a_settle_only_node_trades_nothing_and_writes_the_outcomes(live_dir):
 
 
 def test_a_day_quantlab_has_not_made_yet_is_reported(live_dir):
-    report = run_node(live_dir, "2024-01-09", broker=fake_profile(PRICES)[0])
+    report = run_node(live_dir, "2024-01-09", broker=fake_profile(PRICES)[0], redis=False)
 
     assert not report.started and "quantlab is not ready" in report.error
 
 
 def test_the_command_line_runs_the_node_and_it_writes_its_step_report(live_dir, run_dir):
     (live_dir / "live.toml").write_text(
-        f'run = "{run_dir}"\nbroker = "ibkr_paper"\naccount_id = "U1234567"\ngateway_port = 4002\nredis = false\n'
+        f'run = "{run_dir}"\nbroker = "ibkr_paper"\naccount_id = "U1234567"\ngateway_port = 4002\n'
     )
     assert main(["run-node", str(live_dir), "--date", DATE.date().isoformat()]) == 0
 

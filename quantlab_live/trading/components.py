@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -110,8 +110,9 @@ class TradingParts:
     ----------
     strategy : QuantlabStrategy
     exec_algorithm : ScheduledExecution
-    actors : list
-        ``DecisionSource`` live; none in a replay.
+    decision_source : DecisionSource or None
+        Live, the actor that runs the start check and then publishes the
+        day's bars; ``None`` in a replay.
     preloaded : callable
         ``preloaded(start, end)``: a context manager the engine runs inside
         (a closed-loop replay preloads quantlab's decision inputs over its
@@ -120,13 +121,13 @@ class TradingParts:
 
     strategy: QuantlabStrategy
     exec_algorithm: ScheduledExecution
-    actors: list = field(default_factory=list)
+    decision_source: DecisionSource | None = None
     preloaded: Callable[[Any, Any], contextlib.AbstractContextManager] = lambda start, end: contextlib.nullcontext()
 
     def add_to(self, host) -> None:
         """Add every component to ``host``, a ``LiveNode`` or a ``BacktestEngine``."""
-        for actor in self.actors:
-            host.add_actor(actor)
+        if self.decision_source is not None:
+            host.add_actor(self.decision_source)
         host.add_exec_algorithm(self.exec_algorithm)
         host.add_strategy(self.strategy)
 
@@ -216,5 +217,5 @@ def parts(
         instrument_client=instrument_client,
         dry_run=dry_run,
     )
-    actors = [] if bars is None else [DecisionSource(bars, check=check, on_refused=on_refused)]
-    return TradingParts(strategy, ScheduledExecution(EXEC_ALGORITHM_ID, plan, environment), actors, preloaded)
+    source = None if bars is None else DecisionSource(bars, check=check, on_refused=on_refused)
+    return TradingParts(strategy, ScheduledExecution(EXEC_ALGORITHM_ID, plan, environment), source, preloaded)

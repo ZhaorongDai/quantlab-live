@@ -23,13 +23,17 @@ the supervisor through its step report only (``records.StepReport``):
    day's decision, the end-of-day snapshot and its final step report.
 
 A settle-only node restores from Redis and reconciles as a trading node
-does, trades nothing (it has no decision source), and writes the outcomes.
+does, trades nothing (its decision source publishes no bar), stops as soon
+as its start check has passed (start-up reconciliation is done by then), at
+the latest ``SETTLE_TIMEOUT_SECONDS`` after its start, and writes the
+outcomes.
 A dry run decides and writes the decision and the planned orders under
 ``dry-run/`` in the live directory, and submits nothing.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from pathlib import Path
 
@@ -57,6 +61,8 @@ PLANNED_ORDERS = "orders"
 #: How often the market-data actor looks for instruments to subscribe to, in nanoseconds.
 SUBSCRIBE_EVERY_NS = 2_000_000_000
 NS = 1_000_000_000
+#: The longest a settle-only node waits for its start-up (reconciliation) to pass.
+SETTLE_TIMEOUT_SECONDS = 15 * 60
 
 
 def run_node(
@@ -67,6 +73,7 @@ def run_node(
     dry_run: bool = False,
     report=None,
     broker: BrokerProfile | None = None,
+    redis: bool = True,
 ) -> records.StepReport:
     """Run the day's node of ``live_dir`` until after the close; return its step report.
 
@@ -88,7 +95,11 @@ def run_node(
         ``steps/<date>/manual-<mode>.json``.
     broker : BrokerProfile, optional
         The broker profile; the configured one (``LiveConfig.profile``) by
-        default.
+        default. A test seam, as ``redis`` is.
+    redis : bool, default True
+        Keep the node's cache in Redis (``LiveConfig.redis_host``). Only
+        tests turn it off: such a node restores nothing at a restart, and a
+        real-money start is refused without it.
 
     Returns
     -------
@@ -100,7 +111,7 @@ def run_node(
     --------
     ::
 
-        report = run_node("/data/quantlab/live/us3000_paper", "2026-11-02")
+        report = run_node("live/us3000_paper", "2026-11-02")
         report.started, report.outcomes
     """
     live_dir = Path(live_dir)
@@ -115,18 +126,22 @@ def run_node(
         return state["report"]
 
     try:
-        return _run(live_dir, date, settle, dry_run, broker, write, lambda: state["report"].started)
+        return _run(live_dir, date, settle, dry_run, broker, redis, write, lambda: state["report"].started)
     except Exception as error:
         return write(error=f"{type(error).__name__}: {error}")
 
 
-def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker, write, state_started) -> records.StepReport:
+def _run(
+    live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker, redis: bool, write, state_started
+) -> records.StepReport:
     config = load_config(live_dir)
     profile = broker or config.profile()
+    switches = dataclasses.replace(config.switches(), redis=redis)
+
     def refusals_of(reported=None) -> list[str]:
         return start_refusals(
             profile, account_id=config.ib_account, port=config.gateway_port, reported=reported,
-            version=nautilus_trader.__version__, switches=config.switches(),
+            version=nautilus_trader.__version__, switches=switches,
         )
 
     refusals = refusals_of()
@@ -152,7 +167,7 @@ def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker
     claims = held if snapshot is not None else security_map.ids()
     exec_clients = profile.exec_clients(held)
     data_clients = profile.data_clients(held)
-    simulated = all(c.simulated for c in exec_clients)
+    simulated = profile.simulated
     environment = Environment.SANDBOX if simulated else Environment.LIVE
 
     builder = (
@@ -161,7 +176,7 @@ def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker
         .with_reconciliation(not simulated)
         .with_risk_engine_config(config.risk_engine_config(security_map.ids()))
     )
-    if config.redis:
+    if redis:
         builder = builder.with_cache_database_factory(RedisCacheConfig(host=config.redis_host, port=config.redis_port))
     for client in data_clients:
         builder = builder.add_data_client(client.name, client.factory, client.config)
@@ -180,6 +195,8 @@ def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker
         if refusals:
             return "the start is refused: " + "; ".join(refusals)
         write(started=True)
+        if settle:  # start-up reconciliation is done: nothing is left to wait for
+            handle.stop()
         return None
 
     def refuse(reason: str) -> None:
@@ -193,18 +210,18 @@ def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker
         environment=environment, dry_run=dry_run, bars=bars if bars is not None else [],
         check=check, on_refused=refuse, external_order_claims=claims, instrument_client=data_client,
     )
-    stop_at = session.close + pd.Timedelta(minutes=config.stop_after_close_minutes)
     if settle:
-        stop_at = pd.Timestamp.now(tz="UTC")
-        node.add_actor(components.actors[0])  # the start check, publishing nothing
+        node.add_actor(components.decision_source)  # the start check; it publishes no bar
+        node.add_actor(_StopAt(pd.Timestamp.now(tz="UTC").value, SETTLE_TIMEOUT_SECONDS * NS, handle.stop))
     else:
         components.add_to(node)
-    node.add_actor(_StopAt(stop_at.value, config.min_node_seconds * NS, handle.stop))
+        stop_at = session.close + pd.Timedelta(minutes=config.stop_after_close_minutes)
+        node.add_actor(_StopAt(stop_at.value, config.min_node_seconds * NS, handle.stop))
     if data_client is not None and not settle:
         node.add_actor(_MarketData(data_client))
     node.run()
 
-    source = components.actors[0]
+    source = components.decision_source
     if source.refused is not None:
         node.dispose()
         return write(error=source.refused)

@@ -91,9 +91,6 @@ class LiveConfig:
         The node's cache database. NautilusTrader 2.0.0rc8 cannot select a
         Redis database, so ``redis_db`` must stay 0: paper and real money
         use separate Redis instances.
-    redis : bool, default True
-        Whether the node keeps its cache in Redis; a node without it
-        restores nothing at a restart (tests only).
     gateway_host : str, default ``"127.0.0.1"``
         The IB Gateway's API host.
     gateway_port : int, optional
@@ -108,10 +105,13 @@ class LiveConfig:
     stop_after_close_minutes : int, default 10
         How long after the close the trading node stops.
     min_node_seconds : int, default 15
-        The least a node runs after its start, so a settle-only node, or a
-        node started after its stop time, still restores and reconciles.
-    trader_id : str, optional
-        The node's fixed trader id; derived from the live directory's name.
+        The least a trading node runs after its start, so a node started
+        after its stop time still trades what it may. A settle-only node
+        stops once it has reconciled.
+
+    The node's ``trader_id`` is fixed per live directory, derived from its
+    name (``node_trader_id``), and its cache is always in Redis: a node
+    whose Redis cannot be reached fails to start.
 
     Examples
     --------
@@ -151,8 +151,6 @@ class LiveConfig:
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
     redis_db: int = 0
-    trader_id: str | None = None
-    redis: bool = True
     gateway_host: str = "127.0.0.1"
     gateway_port: int | None = None
     client_id: int = 1
@@ -199,15 +197,13 @@ class LiveConfig:
 
     @property
     def node_trader_id(self) -> str:
-        """The node's trader id: set, or ``QL-<NAME>`` from the live directory's name.
+        """The node's trader id: ``QL-<NAME>`` from the live directory's name.
 
         Examples
         --------
         >>> LiveConfig(run="run", live_dir=Path("/live/us3000_sel0-paper")).node_trader_id
         'QL-US3000SEL0PAPER'
         """
-        if self.trader_id:
-            return self.trader_id
         name = re.sub(r"[^A-Za-z0-9]", "", self.live_dir.absolute().name).upper()
         return f"QL-{name or 'LIVE'}"
 
@@ -224,11 +220,14 @@ class LiveConfig:
         )
 
     def switches(self) -> Switches:
-        """The real-money switches (``guards.Switches``), with the arming file's state read now."""
+        """The real-money switches (``guards.Switches``), with the arming file's state read now.
+
+        The cache is always in Redis; only ``run_node``'s test seam turns it off.
+        """
         return Switches(
             real_money=self.real_money, arming=arming_state(self.live_dir / ARMING_FILE),
             initial_capital=self.initial_capital, max_notional_per_order=self.max_notional_per_order,
-            max_order_submit_rate=self.max_order_submit_rate, redis=self.redis,
+            max_order_submit_rate=self.max_order_submit_rate, redis=True,
         )
 
     def risk_engine_config(self, instrument_ids=()) -> LiveRiskEngineConfig:
@@ -292,11 +291,11 @@ def load_config(live_dir) -> LiveConfig:
     >>> _ = (live_dir / "live.toml").write_text('run = "../run"\\nat = "15:30"\\n')
     >>> load_config(live_dir).plan.at
     '15:30'
-    >>> _ = (live_dir / "live.toml").write_text('run = "../run"\\nmax_capital = 1\\n')
+    >>> _ = (live_dir / "live.toml").write_text('run = "../run"\\nmax_capital = 1\\nredis = false\\n')
     >>> load_config(live_dir)
     Traceback (most recent call last):
     ...
-    ValueError: unknown keys in .../live.toml: max_capital
+    ValueError: unknown keys in .../live.toml: max_capital, redis
     """
     live_dir = Path(live_dir)
     path = live_dir / CONFIG_FILE

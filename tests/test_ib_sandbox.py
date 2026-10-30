@@ -95,9 +95,7 @@ def _live_dir(tmp_path: Path, run_dir: Path, name: str, **keys) -> Path:
         "gateway_host": host, "gateway_port": int(port), "client_id": 71,
         "stop_after_close_minutes": -24 * 60, "min_node_seconds": 120,
     }
-    if REDIS is None:
-        values["redis"] = False
-    else:
+    if REDIS is not None:
         values["redis_host"], values["redis_port"] = REDIS.rsplit(":", 1)[0], int(REDIS.rsplit(":", 1)[1])
     values.update(keys)
     live_dir = tmp_path / name
@@ -133,7 +131,7 @@ def test_the_smart_venue_loads_streams_and_fills_in_the_sandbox(tmp_path, run_di
     held = pd.DataFrame({"quantity": [5.0]}, index=pd.Index([C], name="symbol"))
     records.write_snapshot(live_dir, records.Snapshot(decision_bar_of(today), held, 100_000.0))
 
-    report = run_node(live_dir, today)
+    report = run_node(live_dir, today, redis=REDIS is not None)
 
     assert report.started and report.finished and report.error is None, report
     outcomes = records.read_outcomes(live_dir, decision_bar_of(today))
@@ -146,7 +144,7 @@ def test_the_risk_engine_denies_an_order_above_the_notional_cap(tmp_path, run_di
     live_dir = _live_dir(tmp_path, run_dir, "capped", at=_soon(), min_node_seconds=240, max_notional_per_order=1_000.0)
     today = _today()
 
-    report = run_node(live_dir, today)
+    report = run_node(live_dir, today, redis=REDIS is not None)
 
     assert report.started and report.finished and report.error is None, report
     outcomes = records.read_outcomes(live_dir, decision_bar_of(today))
@@ -200,6 +198,6 @@ def test_a_start_on_a_live_account_is_refused_before_any_order(tmp_path, run_dir
 def test_an_ibkr_paper_start_with_positions_held_overnight_reconciles(tmp_path, run_dir):
     live_dir = _live_dir(tmp_path, run_dir, "paper", broker="ibkr_paper", account_id=ACCOUNT, min_node_seconds=60)
 
-    report = run_node(live_dir, _today(), dry_run=True)
+    report = run_node(live_dir, _today(), dry_run=True, redis=REDIS is not None)
 
     assert report.started and report.finished and report.error is None, report
