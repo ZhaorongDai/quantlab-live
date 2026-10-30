@@ -34,8 +34,8 @@ Public functions carry NumPy docstrings with an Examples section; the examples r
 ## Layout
 
 - `quantlab_live/quantlab_gate.py`: the only module that imports quantlab (an exact allowlist, enforced by a test). `open_run(run_dir)` reads a run in-process (decision bars, target inputs, listings); `prepare_day(run_dir, date, store=...)` waits for quantlab's daily data update and runs quantlab's live prediction job, bound to NUMA node 1 with `taskset`.
-- `quantlab_live/trading/`: NautilusTrader extension classes, the same live and in replay: `DecisionBar` (one decision bar's quantlab inputs as custom data), `QuantlabStrategy`, its target sources and the `ScheduledExecution` execution algorithm.
+- `quantlab_live/trading/`: NautilusTrader extension classes, the same live and in replay: `DecisionBar` (one decision bar's quantlab inputs as custom data), `QuantlabStrategy` (which writes each decision before its first order and resumes a decided bar after a restart), its target sources, the `ScheduledExecution` execution algorithm and `order_outcomes` (one outcome per ordered symbol, priced only from fills).
 - `quantlab_live/records.py`: the repository's own records (decisions, outcomes, snapshots, equity), typed parquet in raw units.
-- `quantlab_live/replay.py`: `replay(run_dir, loop="closed" | "open", start=None, end=None)` trades a quantlab run, or a window of it, on NautilusTrader's `BacktestEngine` and writes the records and NautilusTrader's reports.
+- `quantlab_live/replay.py`: `replay(run_dir, loop="closed" | "open", start=None, end=None)` trades a quantlab run, or a window of it, on NautilusTrader's `BacktestEngine` and writes the records and NautilusTrader's reports. `restarts=[...]` restarts the node mid-replay as after a crash, and a replay into a decided directory resumes its decisions.
 
 The domain vocabulary is in [GLOSSARY.md](GLOSSARY.md).

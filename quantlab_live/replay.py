@@ -80,6 +80,7 @@ from nautilus_trader.model import (
 from quantlab_live import brokers, records
 from quantlab_live.quantlab_gate import PRICE_PRECISION, open_run
 from quantlab_live.trading.decision_bar import NEW_YORK, DecisionBar, decision_ns
+from quantlab_live.trading.outcomes import order_frames, order_outcomes
 from quantlab_live.trading.scheduled_execution import (
     AUCTION_LIFE,
     ExecutionPlan,
@@ -273,6 +274,7 @@ def replay(
     end=None,
     broker: str = "ibkr",
     fill_model: FillModel | None = None,
+    restarts=(),
 ) -> Path:
     """Replay the quantlab run at ``run_dir`` and write the replay directory.
 
@@ -300,6 +302,15 @@ def replay(
     fill_model : nautilus_trader.execution.FillModel, optional
         How orders fill, such as ``ProportionalSlippage``; by default at the
         print.
+    restarts : sequence of datetime-like, optional
+        Times (tz-aware, or New York) at which the node restarts as after a
+        crash: what it held in memory (the execution algorithm's scheduled
+        sends) is lost, the cache (orders, positions, the account) is kept,
+        as Redis keeps it live, and the latest decision bar is published
+        again, so the strategy resumes its decision.
+
+    A replay into a directory that already holds some bars' decisions
+    resumes them rather than deciding them again, as a restarted node does.
 
     Returns
     -------
@@ -315,7 +326,7 @@ def replay(
         without a fee model.
     RuntimeError
         If the strategy failed on a bar (``out_dir`` then holds the records
-        up to that bar).
+        and reports up to that bar).
 
     Examples
     --------
@@ -323,6 +334,7 @@ def replay(
 
         out_dir = replay("runs/USEquityCrossectionSelectStockVectorBt_20261020")
         january = replay(run_dir, loop="open", start="2024-01-02", end="2024-01-31")
+        crashed = replay(run_dir, plan="12:45", restarts=["2024-01-03 10:00", "2024-01-03 13:00"])
     """
     if loop not in ("closed", "open"):
         raise ValueError(f"loop must be 'closed' or 'open', not {loop!r}")
@@ -355,37 +367,76 @@ def replay(
     delistings = _delistings(bars, security_map)
     if delistings:  # the engine refuses empty data
         engine.add_data(delistings)
-    engine.add_data(
-        [CustomData(DataType(DecisionBar.__name__), bar) for bar in bars],
-        client_id=ClientId("QUANTLAB"),
-    )
+    restarts = sorted(_utc_ns(t) for t in restarts)
+    published = [CustomData(DataType(DecisionBar.__name__), bar) for bar in bars]
+    for restart in restarts:
+        latest = [bar for bar in bars if bar.ts_event < restart]
+        if latest:
+            again = DecisionBar(bar=latest[-1].bar, payload=latest[-1].payload, ts_event=restart, ts_init=restart)
+            published.append(CustomData(DataType(DecisionBar.__name__), again))
+    engine.add_data(published, client_id=ClientId("QUANTLAB"))
     algorithm_id = ExecAlgorithmId("SCHEDULED")
-    engine.add_exec_algorithm(ScheduledExecution(algorithm_id, plan, Environment.BACKTEST))
+    algorithm = ScheduledExecution(algorithm_id, plan, Environment.BACKTEST)
+    engine.add_exec_algorithm(algorithm)
     if loop == "closed":
         inputs = run.targets("closed", end=end)
         targets, preload = ConstructorTargets(inputs), inputs.preloaded(start, end)
     else:
         targets, preload = RebalanceTableTargets(run.targets("open")), contextlib.nullcontext()
-    strategy = QuantlabStrategy(
-        targets,
-        security_map,
-        algorithm_id,
-        on_decision=lambda bar, decision, equity: _record_bar(
-            out_dir, bar, decision, equity, splits.ratio(bar)
-        ),
-    )
+    decisions = _ReplayDecisions(out_dir, splits)
+    strategy = QuantlabStrategy(targets, security_map, algorithm_id, decisions)
     engine.add_strategy(strategy)
     with preload:
-        engine.run()
-    if strategy.failure is not None:
-        bar, error = strategy.failure
-        engine.dispose()
-        raise RuntimeError(f"the strategy failed on bar {bar.date()}: {error}") from error
-    for bar, outcomes in _outcomes(engine.cache.orders(), security_map, splits).items():
+        for restart in restarts:
+            engine.run(end=restart - 1, streaming=True)
+            algorithm.clock.cancel_timers()  # lost with the crashed process
+        if restarts:
+            engine.run(start=restarts[-1] - 1)
+        else:
+            engine.run()
+    orders = [o for o in engine.cache.orders() if not brokers.is_expiration(o)]
+    for bar, outcomes in _outcomes(orders, decisions.decided, security_map, splits).items():
         records.write_outcomes(out_dir, bar, outcomes)
     _export_reports(engine, out_dir / "reports")
     engine.dispose()
+    if strategy.failure is not None:
+        bar, error = strategy.failure
+        raise RuntimeError(f"the strategy failed on bar {bar.date()}: {error}") from error
     return out_dir
+
+
+class _ReplayDecisions:
+    """The replay directory's decisions, in raw units on disk and engine units in the engine.
+
+    Writing a decision also records the bar's snapshot and equity. Every
+    decision written or read is kept, in engine units, for the outcomes.
+    """
+
+    def __init__(self, out_dir: Path, splits: SplitTable):
+        self._out_dir = out_dir
+        self._splits = splits
+        self.decided: dict[pd.Timestamp, pd.DataFrame] = {}
+
+    def read(self, bar: pd.Timestamp) -> pd.DataFrame | None:
+        try:
+            decision = records.read_decision(self._out_dir, bar)
+        except FileNotFoundError:
+            return None
+        ratio = self._splits.ratio(bar).reindex(decision.index)
+        decision["close"] = decision["close"] * ratio
+        for column in ("position_quantity", "target_quantity", "order_quantity"):
+            decision[column] = decision[column] / ratio
+        self.decided[bar] = decision
+        return decision
+
+    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float) -> None:
+        _record_bar(self._out_dir, bar, decision, capital, self._splits.ratio(bar))
+        self.decided[bar] = decision
+
+
+def _utc_ns(t) -> int:
+    t = pd.Timestamp(t)
+    return (t.tz_localize(NEW_YORK) if t.tz is None else t).value
 
 
 def _record_bar(
@@ -413,56 +464,36 @@ def _record_bar(
     records.append_equity(out_dir, bar, cash, holdings)
 
 
-def _outcomes(orders, security_map: IdentityMap, splits: SplitTable) -> dict[pd.Timestamp, pd.DataFrame]:
-    """What each bar's orders did, by bar and symbol, in raw units.
+def _outcomes(
+    orders, decided: dict[pd.Timestamp, pd.DataFrame], security_map: IdentityMap, splits: SplitTable
+) -> dict[pd.Timestamp, pd.DataFrame]:
+    """The outcomes of each decided bar's orders, by bar and symbol, in raw units.
 
-    A strategy order is the primary; the execution algorithm's children
-    carry its client order id as their ``exec_spawn_id`` and hold the fills.
-    An order is converted at the session its children were sent in, an
-    order never sent at its decision bar.
+    ``order_outcomes`` judges them in engine units; a symbol's outcome is
+    converted at the session its first child was sent in, or at its
+    decision bar if none was.
     """
-    # The venue's own orders (a delisting's EXPIRATION-*) belong to no decision.
-    primaries = [o for o in orders if _is_primary(o) and not brokers.is_expiration(o)]
-    children: dict[str, list] = {}
-    for order in orders:
-        if not _is_primary(order):
-            children.setdefault(order.exec_spawn_id.value, []).append(order)
-    rows: dict[pd.Timestamp, dict[int, dict]] = {}
-    for primary in primaries:
-        spawned = children.get(primary.client_order_id.value, [])
-        sign = 1.0 if primary.side == OrderSide.BUY else -1.0
-        quantity = float(primary.events()[0].quantity)  # as initialized, before spawning
-        filled = sum(float(c.filled_qty) for c in spawned)
-        cost = sum(float(c.filled_qty) * float(c.avg_px) for c in spawned if float(c.filled_qty))
-        if not spawned:
-            status = "not_sent"
-        elif filled == quantity:
-            status = "filled"
-        else:
-            status = "partially_filled" if filled else "unfilled"
-        bar = _bar_of(primary)
-        symbol = security_map.to_symbol(primary.instrument_id)
-        sent = spawned[0].ts_init if spawned else decision_ns(bar)
-        ratio = float(splits.at(sent)[symbol])
-        rows.setdefault(bar, {})[symbol] = {
-            "order_quantity": sign * quantity * ratio,
-            "filled_quantity": sign * filled * ratio,
-            "avg_px": cost / filled / ratio if filled else float("nan"),
-            "status": status,
-        }
-    return {
-        bar: pd.DataFrame.from_dict(by_symbol, orient="index").rename_axis("symbol")
-        for bar, by_symbol in rows.items()
-    }
+    frame, fills = order_frames(orders, security_map.to_symbol)
+    frame["bar"] = frame["tags"].map(_bar_of)
+    result = {}
+    for bar, decision in decided.items():
+        mine = frame[frame["bar"] == bar]
+        outcomes = order_outcomes(decision, mine, fills[fills["client_order_id"].isin(mine.index)], None)
+        if outcomes.empty:
+            continue
+        children = mine[mine["child"].notna()]
+        for symbol in outcomes.index:
+            sent = children.loc[children["symbol"] == symbol, "ts_init"]
+            ratio = float(splits.at(int(sent.min()) if len(sent) else decision_ns(bar))[symbol])
+            outcomes.loc[symbol, ["order_quantity", "filled_quantity"]] *= ratio
+            outcomes.loc[symbol, "avg_px"] /= ratio
+        result[bar] = outcomes
+    return result
 
 
-def _is_primary(order) -> bool:
-    return order.exec_spawn_id is None or order.exec_spawn_id == order.client_order_id
-
-
-def _bar_of(order) -> pd.Timestamp:
+def _bar_of(tags) -> pd.Timestamp:
     """The decision bar named by an order's ``bar_tag``."""
-    (tag,) = (t for t in order.tags or [] if t.startswith(BAR_TAG))
+    (tag,) = (t for t in tags if t.startswith(BAR_TAG))
     return pd.Timestamp(tag.removeprefix(BAR_TAG))
 
 

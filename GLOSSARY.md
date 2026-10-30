@@ -36,3 +36,12 @@ Shares and prices as traded on each date, not split adjusted; every record is in
 **Engine unit**:
 A replay engine's unit of quantity: the raw shares of one share at the replay's first bar, so a split never changes a position's quantity. Replay converts engine units to raw units at the edges (the fee model, dividends, the records).
 _Avoid_: adjusted share
+
+**Foreign position**:
+A position in the account that the strategy does not own (a manual trade, another holding); never traded, outside the strategy capital, and a target on its instrument is skipped.
+
+**Unmapped**:
+A symbol with no instrument on the day; a target on it is skipped and stays in cash.
+
+**Order outcome**:
+What an ordered symbol of a decision came to, exactly one per symbol: filled, partially filled, cancelled (by us), venue cancelled (with or without a fallback), rejected, unmapped, foreign, not sent or unverified.

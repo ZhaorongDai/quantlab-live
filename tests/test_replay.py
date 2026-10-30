@@ -30,12 +30,13 @@ def _open_print(bar: pd.Timestamp) -> pd.Timestamp:
 
 
 @pytest.fixture(scope="module")
-def replayed(tmp_path_factory):
-    root = tmp_path_factory.mktemp("open")
-    run_dir = build_quantlab_run(root, BARS, OPEN, CLOSE, WEIGHTS, init_cash=10_000.0)
-    out_dir = root / "replay"
-    replay(run_dir, out_dir, loop="open")
-    return out_dir
+def run_dir(tmp_path_factory):
+    return build_quantlab_run(tmp_path_factory.mktemp("open"), BARS, OPEN, CLOSE, WEIGHTS, init_cash=10_000.0)
+
+
+@pytest.fixture(scope="module")
+def replayed(run_dir, tmp_path_factory):
+    return replay(run_dir, tmp_path_factory.mktemp("replayed") / "replay", loop="open")
 
 
 def test_each_bars_orders_fill_at_the_next_opening_print(replayed):
@@ -115,12 +116,44 @@ def test_records_are_typed_and_keyed_by_bar_timestamp(replayed):
         assert path.stem == frame["bar"].iloc[0].date().isoformat()
 
 
-def test_a_replay_into_a_decided_directory_fails_on_the_strategys_error(tmp_path):
+def _fills(out_dir) -> list[tuple]:
+    frame = pd.read_parquet(out_dir / "reports" / "fills.parquet")
+    return sorted(
+        (row.ts_event, row.instrument_id, row.order_side, float(row.last_qty), float(row.last_px))
+        for row in frame.itertuples()
+    )
+
+
+def test_a_second_replay_into_a_decided_directory_resumes_its_decisions(run_dir, replayed, tmp_path):
+    out_dir = tmp_path / "replay"
+    first = replay(run_dir, out_dir, loop="open")
+    decided = {p.name: p.read_bytes() for p in (first / "decisions").iterdir()}
+    again = replay(run_dir, out_dir, loop="open")
+    # Nothing is decided again, and every order is sent once.
+    assert {p.name: p.read_bytes() for p in (again / "decisions").iterdir()} == decided
+    assert _fills(again) == _fills(replayed)
+    assert records.read_equity(again)["equity"].tolist() == [10_000.0, 9_850.5, 11_100.5, 12_308.0]
+
+
+def test_a_replay_stopped_part_way_resumes_where_it_stopped(run_dir, replayed, tmp_path):
+    out_dir = tmp_path / "replay"
+    stopped = replay(run_dir, out_dir, loop="open", end=BARS[2])
+    # The stop left bar 2's orders unsent; the second run sends them.
+    assert records.read_outcomes(stopped, BARS[2])["status"].eq("not_sent").all()
+    resumed = replay(run_dir, out_dir, loop="open")
+    assert _fills(resumed) == _fills(replayed)
+    assert records.read_outcomes(resumed, BARS[2])["status"].eq("filled").all()
+    assert list(records.read_equity(resumed).index) == list(BARS)
+
+
+def test_no_order_is_sent_for_a_decision_that_could_not_be_written(tmp_path):
     run_dir = build_quantlab_run(tmp_path, BARS, OPEN, CLOSE, WEIGHTS)
-    replay(run_dir, tmp_path / "replay", loop="open")
-    # A second replay into the same directory finds the first bar decided.
-    with pytest.raises(RuntimeError, match="2024-01-02 already has a decision"):
-        replay(run_dir, tmp_path / "replay", loop="open")
+    out_dir = tmp_path / "replay"
+    out_dir.mkdir()
+    (out_dir / "decisions").write_text("not a directory")
+    with pytest.raises(RuntimeError, match="the strategy failed on bar 2024-01-02"):
+        replay(run_dir, out_dir, loop="open")
+    assert pd.read_parquet(out_dir / "reports" / "orders.parquet").empty
 
 
 def test_an_order_without_an_opening_print_is_not_filled(tmp_path):

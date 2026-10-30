@@ -38,6 +38,7 @@ DECISION_SCHEMA = pa.schema(
         ("position_quantity", pa.float64()),
         ("target_quantity", pa.float64()),
         ("order_quantity", pa.float64()),
+        ("skip", pa.string()),
     ]
 )
 OUTCOME_SCHEMA = pa.schema(
@@ -90,7 +91,9 @@ def write_decision(directory, bar: pd.Timestamp, decision: pd.DataFrame) -> Path
         The decision bar.
     decision : pandas.DataFrame
         By ``symbol``: ``weight`` (NaN where kept), ``close``,
-        ``position_quantity``, ``target_quantity`` and ``order_quantity``.
+        ``position_quantity``, ``target_quantity``, ``order_quantity`` and
+        ``skip``: why an ordered symbol is not traded (``"unmapped"``,
+        ``"foreign"``), empty when it is.
 
     Raises
     ------
@@ -103,7 +106,7 @@ def write_decision(directory, bar: pd.Timestamp, decision: pd.DataFrame) -> Path
     >>> directory = tempfile.mkdtemp()
     >>> decision = pd.DataFrame(
     ...     {"weight": [0.5], "close": [10.0], "position_quantity": [0.0],
-    ...      "target_quantity": [50.0], "order_quantity": [50.0]},
+    ...      "target_quantity": [50.0], "order_quantity": [50.0], "skip": [""]},
     ...     index=pd.Index([10001], name="symbol"),
     ... )
     >>> _ = write_decision(directory, pd.Timestamp("2024-01-02"), decision)
@@ -142,7 +145,8 @@ def write_outcomes(directory, bar: pd.Timestamp, outcomes: pd.DataFrame) -> Path
     ----------
     outcomes : pandas.DataFrame
         By ``symbol``: the signed ``order_quantity`` and ``filled_quantity``,
-        the fills' ``avg_px`` (NaN without a fill) and the ``status``.
+        the fills' ``avg_px`` (NaN without a fill) and the ``status``
+        (``trading.outcomes``).
 
     Examples
     --------

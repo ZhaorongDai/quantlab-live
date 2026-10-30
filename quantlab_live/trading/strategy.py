@@ -3,16 +3,16 @@
 The strategy receives each ``DecisionBar`` in ``on_data`` only; it never
 knows whether it runs live or in a replay. On a bar it values its holdings at
 the bar's marks, asks its target source for the bar's weights given those
-holdings, sizes them in whole shares of the strategy capital and submits the
-difference to its execution algorithm, which decides when the orders reach
-the venue. Each order is tagged with its bar and with the bar's close, which
-a limit plan's band is around.
+holdings, sizes them in whole shares of the strategy capital, writes the
+decision durably and only then submits the difference to its execution
+algorithm, which decides when the orders reach the venue. A bar already
+decided is resumed, never decided again. Each order is tagged with its bar
+and with the bar's close, which a limit plan's band is around.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
 from typing import Protocol
 
 import pandas as pd
@@ -22,12 +22,15 @@ from nautilus_trader.model import (
     ExecAlgorithmId,
     InstrumentId,
     OrderSide,
+    OrderStatus,
     Quantity,
     StrategyId,
     TimeInForce,
 )
 from nautilus_trader.trading import Strategy, StrategyConfig
 
+from quantlab_live import records
+from quantlab_live.trading import outcomes
 from quantlab_live.trading.decision_bar import DecisionBar
 from quantlab_live.trading.scheduled_execution import MARK_TAG
 
@@ -49,6 +52,50 @@ class SecurityMap(Protocol):
     def to_id(self, symbol: int) -> InstrumentId | None: ...
 
     def to_symbol(self, instrument_id: InstrumentId) -> int | None: ...
+
+
+class DecisionRecords(Protocol):
+    """Where the strategy keeps its decisions, one per bar.
+
+    ``write`` returns only once the decision is durable; the strategy sends
+    no order of a bar before it has. ``read`` returns ``None`` for a bar not
+    yet decided. Quantities and prices are in the strategy's units.
+    """
+
+    def read(self, bar: pd.Timestamp) -> pd.DataFrame | None: ...
+
+    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float) -> None: ...
+
+
+class DirectoryDecisions:
+    """The decisions of a live directory, in ``records`` (a unit is a raw share).
+
+    Parameters
+    ----------
+    directory : path-like
+        The live directory.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> decisions = DirectoryDecisions(tempfile.mkdtemp())
+    >>> decisions.read(pd.Timestamp("2024-01-02")) is None
+    True
+    """
+
+    def __init__(self, directory):
+        self._directory = directory
+
+    def read(self, bar: pd.Timestamp) -> pd.DataFrame | None:
+        """Return the decision on ``bar``, or ``None`` if it has none."""
+        try:
+            return records.read_decision(self._directory, bar)
+        except FileNotFoundError:
+            return None
+
+    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float) -> None:
+        """Write the decision on ``bar`` durably (tmp, fsync and rename)."""
+        records.write_decision(self._directory, bar, decision)
 
 
 def _config() -> StrategyConfig:
@@ -73,6 +120,18 @@ def bar_tag(bar: pd.Timestamp) -> str:
 class QuantlabStrategy(Strategy):
     """Trade a quantlab run's targets, one decision per ``DecisionBar``.
 
+    On a bar not yet decided, the strategy decides, writes the decision and
+    only then submits its orders. On a bar already decided (a restarted node
+    receiving the day's bar again, or a second replay into a decided
+    directory) it does not decide again: it cancels the primaries the
+    execution algorithm kept locally and never sent, and submits what is
+    left of the decision, ``remaining_orders``.
+
+    Its holdings are its own positions. A position it does not own is
+    foreign: never traded, outside the strategy capital, and a target on its
+    instrument is skipped. A target without an instrument is skipped as
+    unmapped. A skipped symbol stays in cash; the decision records why.
+
     Parameters
     ----------
     targets : TargetSource
@@ -83,15 +142,14 @@ class QuantlabStrategy(Strategy):
         The symbol of each instrument and back.
     exec_algorithm_id : ExecAlgorithmId
         The execution algorithm every order is sent to.
-    on_decision : callable, optional
-        Called with the bar, its decision frame and the capital sized on,
-        before the first order.
+    decisions : DecisionRecords
+        Where the decisions are kept.
 
     Examples
     --------
     ::
 
-        strategy = QuantlabStrategy(targets, security_map, ExecAlgorithmId("SCHEDULED"))
+        strategy = QuantlabStrategy(targets, security_map, ExecAlgorithmId("SCHEDULED"), DirectoryDecisions(live_dir))
     """
 
     def __new__(cls, *args, **kwargs):
@@ -103,13 +161,13 @@ class QuantlabStrategy(Strategy):
         targets: TargetSource,
         security_map: SecurityMap,
         exec_algorithm_id: ExecAlgorithmId,
-        on_decision: Callable[[pd.Timestamp, pd.DataFrame, float], None] | None = None,
+        decisions: DecisionRecords,
     ):
         super().__init__(_config())
         self._targets = targets
         self._map = security_map
         self._exec_algorithm_id = exec_algorithm_id
-        self._on_decision = on_decision
+        self._decisions = decisions
         #: The first error a decision raised, with its bar; the strategy decides
         #: nothing after it. NautilusTrader logs a handler's error and carries
         #: on, so whoever runs the strategy reads this.
@@ -123,7 +181,11 @@ class QuantlabStrategy(Strategy):
         if not isinstance(record, DecisionBar) or self.failure is not None:
             return
         try:
-            self._decide(record)
+            decision = self._decisions.read(record.timestamp)
+            if decision is None:
+                self._decide(record)
+            else:
+                self._resume(record.timestamp, decision)
         except Exception as error:
             self.failure = (record.timestamp, error)
             raise
@@ -133,17 +195,36 @@ class QuantlabStrategy(Strategy):
         close = record.marks()["close"]
         held = self._holdings()
         value = held["quantity"] * close.reindex(held.index)
-        capital = strategy_capital(self._cash(close, held) + float(value.sum()))
+        capital = strategy_capital(self._cash(close) + float(value.sum()))
         current = value / capital if capital else value * 0.0
         decision = size_orders(self._targets.weights(record, current), close, held, capital)
-        if self._on_decision is not None:
-            self._on_decision(bar, decision, capital)
-        for symbol, quantity in decision["order_quantity"].items():
-            instrument_id = self._map.to_id(symbol)
-            if quantity == 0 or instrument_id is None:
+        decision["skip"] = self._skips(decision)
+        self._decisions.write(bar, decision, capital)
+        ordered = decision[(decision["order_quantity"] != 0) & (decision["skip"] == "")]
+        self._submit(bar, ordered["order_quantity"], decision["close"])
+
+    def _resume(self, bar: pd.Timestamp, decision: pd.DataFrame) -> None:
+        """Carry on with a decided bar: cancel the kept primaries, send the rest."""
+        for order in self.cache.orders(strategy_id=self.strategy_id):
+            if _is_primary(order) and order.status == OrderStatus.INITIALIZED and order.leaves_qty.as_double() > 0:
+                self.cancel_order(order.client_order_id)
+        position = self._holdings()["quantity"]
+        working = {}
+        open_orders = self.cache.orders_open(strategy_id=self.strategy_id)
+        for order in [*open_orders, *self.cache.orders_inflight(strategy_id=self.strategy_id)]:
+            symbol = self._map.to_symbol(order.instrument_id)
+            if _is_primary(order) or symbol is None:
                 continue
+            sign = 1.0 if order.side == OrderSide.BUY else -1.0
+            working[symbol] = working.get(symbol, 0.0) + sign * order.leaves_qty.as_double()
+        remaining = remaining_orders(decision, position, pd.Series(working, dtype=float))
+        self.log.info(f"resuming the decision on {bar.date()}: {len(remaining)} orders remain")
+        self._submit(bar, remaining, decision["close"])
+
+    def _submit(self, bar: pd.Timestamp, quantities: pd.Series, close: pd.Series) -> None:
+        for symbol, quantity in quantities.items():
             order = self.order_factory.market(
-                instrument_id,
+                self._map.to_id(symbol),
                 OrderSide.BUY if quantity > 0 else OrderSide.SELL,
                 Quantity(abs(quantity), 0),
                 time_in_force=TimeInForce.DAY,
@@ -151,6 +232,25 @@ class QuantlabStrategy(Strategy):
                 tags=[bar_tag(bar), MARK_TAG + repr(float(close[symbol]))],
             )
             self.submit_order(order)
+
+    def _skips(self, decision: pd.DataFrame) -> pd.Series:
+        """Why each ordered symbol is not traded: ``unmapped``, ``foreign`` or ``""``."""
+        foreign = {p.instrument_id for p in self._foreign_positions()}
+        skips = pd.Series("", index=decision.index, dtype=object)
+        for symbol in decision.index[decision["order_quantity"] != 0]:
+            instrument_id = self._map.to_id(symbol)
+            if instrument_id is None:
+                skips[symbol] = outcomes.UNMAPPED
+            elif instrument_id in foreign:
+                skips[symbol] = outcomes.FOREIGN
+            else:
+                continue
+            self.log.warning(f"symbol {symbol} is {skips[symbol]}; it is not traded")
+        return skips
+
+    def _foreign_positions(self) -> list:
+        """The open positions the strategy does not own."""
+        return [p for p in self.cache.positions_open() if p.strategy_id != self.strategy_id]
 
     def _holdings(self) -> pd.DataFrame:
         """The signed quantity and average open price of each held symbol."""
@@ -162,16 +262,61 @@ class QuantlabStrategy(Strategy):
         frame = pd.DataFrame.from_dict(rows, orient="index", columns=["quantity", "avg_px"])
         return frame.astype(float)
 
-    def _cash(self, close: pd.Series, held: pd.DataFrame) -> float:
-        """The account's cash: its balance less the cost of the open positions.
+    def _cash(self, close: pd.Series) -> float:
+        """The account's cash: its balance less the cost of every open position.
 
         The account is the one of the venue the bar's instruments trade on.
+        A position the strategy does not own, or cannot map, costs cash but
+        adds no value to the strategy capital.
         """
         ids = (self._map.to_id(symbol) for symbol in close.index)
         venue = next(i for i in ids if i is not None).venue
         account = self.cache.account_for_venue(venue)
         balance = float(account.balance_total().as_decimal())
-        return balance - float((held["quantity"] * held["avg_px"]).sum())
+        positions = self.cache.positions_open(venue=venue)
+        return balance - sum(float(p.signed_qty) * float(p.avg_px_open) for p in positions)
+
+
+def _is_primary(order) -> bool:
+    """Whether ``order`` is a strategy's order rather than a child spawned from one."""
+    return order.exec_spawn_id is None or order.exec_spawn_id == order.client_order_id
+
+
+def remaining_orders(decision: pd.DataFrame, position: pd.Series, working: pd.Series) -> pd.Series:
+    """Return what is left to order of a decision: target less position less working orders.
+
+    Only the symbols the decision orders and does not skip are traded, so a
+    resumed decision never trades a kept holding or a skipped symbol. Sending
+    the result again once it is working gives nothing, so resuming any
+    number of times never duplicates an order.
+
+    Parameters
+    ----------
+    decision : pandas.DataFrame
+        By ``symbol``: ``target_quantity``, ``order_quantity`` and ``skip``.
+    position : pandas.Series
+        The signed position by symbol.
+    working : pandas.Series
+        The signed quantity still working at the venue by symbol.
+
+    Returns
+    -------
+    pandas.Series
+        The signed order quantity by symbol, without zeros.
+
+    Examples
+    --------
+    >>> decision = pd.DataFrame(
+    ...     {"target_quantity": [500.0, 40.0], "order_quantity": [500.0, 40.0], "skip": ["", ""]},
+    ...     index=pd.Index([10001, 10002], name="symbol"),
+    ... )
+    >>> remaining_orders(decision, pd.Series({10001: 300.0}), pd.Series({10001: 100.0})).to_dict()
+    {10001: 100.0, 10002: 40.0}
+    """
+    ordered = decision[(decision["order_quantity"] != 0) & (decision["skip"].fillna("") == "")]
+    target = ordered["target_quantity"]
+    left = target - position.reindex(target.index, fill_value=0.0) - working.reindex(target.index, fill_value=0.0)
+    return left[left != 0].rename(None)
 
 
 def strategy_capital(

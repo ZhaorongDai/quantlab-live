@@ -125,8 +125,11 @@ def test_a_limit_plan_fills_only_inside_its_band_and_falls_back_for_the_rest(run
     assert got["10003.SIM"] == (ny("2024-01-03", "09:30"), 40.0, 48.0)
     assert got["10001.SIM"] == (ny("2024-01-03", "09:35"), 500.0, 10.5064)
     outcomes = records.read_outcomes(out_dir, BARS[0])
-    assert outcomes["status"].eq("filled").all()
+    assert outcomes["status"].to_dict() == {
+        10001: "venue_cancelled_fallback", 10002: "filled", 10003: "filled",
+    }
     assert outcomes["order_quantity"].to_dict() == {10001: 500.0, 10002: 150.0, 10003: 40.0}
+    assert outcomes["filled_quantity"].to_dict() == {10001: 500.0, 10002: 150.0, 10003: 40.0}
 
 
 def test_a_missed_opening_auction_falls_back_to_a_day_market_order(run_dir, tmp_path):
@@ -140,11 +143,14 @@ def test_a_missed_opening_auction_falls_back_to_a_day_market_order(run_dir, tmp_
     orders = pd.read_parquet(out_dir / "reports" / "orders.parquet")
     children = orders[orders["exec_spawn_id"].notna() & (orders["exec_spawn_id"] != orders.index)]
     assert sorted(children["status"]) == ["EXPIRED"] * 3 + ["FILLED"] * 3
+    outcomes = records.read_outcomes(out_dir, BARS[0])
+    assert outcomes["status"].eq("venue_cancelled_fallback").all()
+    assert outcomes["avg_px"].to_dict() == {10001: 10.5064, 10002: 20.4936, 10003: 47.8974}
 
 
-def test_a_missed_closing_auction_is_recorded_as_unfilled(run_dir, tmp_path):
+def test_a_missed_closing_auction_is_recorded_as_cancelled_by_the_venue(run_dir, tmp_path):
     out_dir = replay(run_dir, tmp_path, loop="open", plan="close_auction", fill_model=NeverFillsAuctions())
     assert pd.read_parquet(out_dir / "reports" / "fills.parquet").empty
     outcomes = records.read_outcomes(out_dir, BARS[0])
-    assert outcomes["status"].eq("unfilled").all()
+    assert outcomes["status"].eq("venue_cancelled").all()
     assert outcomes["filled_quantity"].eq(0).all()
