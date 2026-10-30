@@ -51,7 +51,7 @@ def test_each_bars_orders_fill_at_the_next_opening_print(replayed):
         for row in fills.itertuples()
     )
     # Bar 0 sizes 10,000 at its closes and fills at bar 1's open; bar 1 keeps;
-    # bar 2 sizes its equity of 11,105 (cash -245, holdings 11,350) in whole
+    # bar 2 sizes its equity of 11,100.50 (cash -249.50, holdings 11,350) in whole
     # shares and fills at bar 3's open; the last bar has no next open.
     assert got == sorted(
         [
@@ -73,9 +73,10 @@ def test_nautilus_trader_reports_are_exported_to_the_replay_directory(replayed):
 def test_equity_is_valued_at_each_bars_raw_close(replayed):
     equity = records.read_equity(replayed)
     assert list(equity.index) == list(BARS)
-    # Bar 1: cash 10,000 - 10,245 of fills, holdings 500 x 11 + 150 x 20 + 40 x 40.
-    assert equity["cash"].tolist() == [10_000.0, -245.0, -245.0, -133.0]
-    assert equity["equity"].tolist() == [10_000.0, 9_855.0, 11_105.0, 12_317.0]
+    # Bar 1: cash 10,000 - 10,245 of fills - 4.50 of IBKR fees (2.50 on 500
+    # shares, the 1.00 minimum on 150 and on 40), holdings 500 x 11 + 150 x 20 + 40 x 40.
+    assert equity["cash"].tolist() == [10_000.0, -249.5, -249.5, -142.0]
+    assert equity["equity"].tolist() == [10_000.0, 9_850.5, 11_100.5, 12_308.0]
 
 
 def test_snapshots_hold_each_bars_positions_in_raw_shares(replayed):
@@ -83,7 +84,7 @@ def test_snapshots_hold_each_bars_positions_in_raw_shares(replayed):
     second = records.read_snapshot(replayed, BARS[2])
     assert second.positions["quantity"].to_dict() == {10001: 500.0, 10002: 150.0, 10003: 40.0}
     last = records.read_snapshot(replayed, BARS[3])
-    assert (last.bar, last.cash) == (BARS[3], -133.0)
+    assert (last.bar, last.cash) == (BARS[3], -142.0)
     assert last.positions["quantity"].to_dict() == {10002: 222.0, 10003: 138.0}
 
 
