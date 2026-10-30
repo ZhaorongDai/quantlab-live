@@ -185,22 +185,86 @@ class Run:
 
             first_prints = run.opens().iloc[0]
         """
+        return self._raw("open", start, end)
+
+    def closes(self, start=None, end=None) -> pd.DataFrame:
+        """Return the raw close of every dataset bar from ``start`` to ``end``.
+
+        A replay feeds these as the closing prints. NaN where the market had
+        no close; unlike a decision bar's marks, nothing is carried forward.
+
+        Parameters
+        ----------
+        start, end : datetime-like, optional
+            Default to the run's window.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Indexed by bar, one column per symbol.
+
+        Examples
+        --------
+        ::
+
+            first_closes = run.closes().iloc[0]
+        """
+        return self._raw("close", start, end)
+
+    def _raw(self, name: str, start, end) -> pd.DataFrame:
         start = self.window[0] if start is None else pd.Timestamp(start)
         end = self.window[1] if end is None else pd.Timestamp(end)
         prices = self._dataset.panel(start, end).load()
-        frame = prices["open"].transpose("timestamp", "symbol").to_pandas()
+        frame = prices[name].transpose("timestamp", "symbol").to_pandas()
         return frame.rename_axis(index=None, columns=None)
 
-    def targets(self, loop: str) -> DecisionInputs | xr.DataArray:
+    def corporate_actions(self, start=None, end=None) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Return the split factor and the cash dividend of every dataset bar.
+
+        Both are quantlab's shared panel variables, on their ex-dates: the
+        ``splitFactor`` (new shares per old share, 2 for a two-for-one split,
+        1 where none) and the ``divCash`` per share (0 where none).
+
+        Parameters
+        ----------
+        start, end : datetime-like, optional
+            Default to the run's window.
+
+        Returns
+        -------
+        split_factor, dividend : pandas.DataFrame
+            Indexed by bar, one column per symbol; neutral where the
+            dataset has no value.
+
+        Examples
+        --------
+        ::
+
+            split_factor, dividend = run.corporate_actions()
+        """
+        start = self.window[0] if start is None else pd.Timestamp(start)
+        end = self.window[1] if end is None else pd.Timestamp(end)
+        prices = self._dataset.panel(start, end, variables=["splitFactor", "divCash"]).load()
+
+        def frame(name: str, neutral: float) -> pd.DataFrame:
+            values = prices[name].transpose("timestamp", "symbol").to_pandas()
+            return values.fillna(neutral).rename_axis(index=None, columns=None)
+
+        return frame("splitFactor", 1.0), frame("divCash", 0.0)
+
+    def targets(self, loop: str, *, end=None) -> DecisionInputs | xr.DataArray:
         """Return the raw inputs of the run's targets.
 
         Parameters
         ----------
         loop : {"closed", "open"}
             ``"closed"``: quantlab's decision inputs (the run's rule bound to
-            its label specs, schedule left open-ended as a live run's is);
-            ``"open"``: the run's rebalance table, ``weight`` on
-            ``(timestamp, symbol)``.
+            its label specs); ``"open"``: the run's rebalance table,
+            ``weight`` on ``(timestamp, symbol)``.
+        end : datetime-like, optional
+            Closed loop: the last bar of a replay, which is not decided (its
+            orders would have no next bar to fill on). Without it the
+            schedule is open-ended, as a live run's is.
 
         Raises
         ------
@@ -228,7 +292,7 @@ class Run:
                 f"quantlab run {self.run_dir} is valued at raw prices; a closed loop "
                 f"decides on adjusted closes"
             )
-        return DecisionInputs.from_run(self._backtest_run, end=None, price_dataset=self._dataset)
+        return DecisionInputs.from_run(self._backtest_run, end=end, price_dataset=self._dataset)
 
     def listings(self, date, symbols=None) -> pd.DataFrame:
         """Return the ticker and primary exchange of each symbol as of ``date``.
