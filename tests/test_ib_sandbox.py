@@ -41,15 +41,12 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from quantlab.portfolio.config import TopkDropoutConfig
-from quantlab.portfolio.predefined.topk_dropout import TopkDropoutConstructor
-from quantlab.runs.prediction_panel import LabelSpec
 
 from quantlab_live import records
 from quantlab_live.live import run_node
 from quantlab_live.live.node import decision_bar_of
 from quantlab_live.trading.scheduled_execution import NEW_YORK, Session
-from tests.quantlab_run_fixture import build_constructor_run
+from tests.quantlab_run_fixture import RET_5, build_constructor_run, topk_dropout
 
 GATEWAY = os.environ.get("QUANTLAB_LIVE_IB_GATEWAY")
 REDIS = os.environ.get("QUANTLAB_LIVE_REDIS")
@@ -71,9 +68,9 @@ def _run(root: Path, close: dict) -> Path:
     bars = pd.bdate_range(end=decision_bar_of(_today()), periods=4)
     closes = {symbol: [price] * 4 for symbol, price in close.items()}
     predictions = {"ret_5": {A: [0.03] * 4, B: [0.02] * 4, C: [0.01] * 4}}
-    rule = TopkDropoutConstructor(TopkDropoutConfig(direction="long_only", topk=2, n_drop=1))
+    rule = topk_dropout()
     run_dir, _ = build_constructor_run(
-        root, bars, closes, closes, predictions, rule, [LabelSpec("ret_5", "raw", 1, 5)], listings=LISTINGS,
+        root, bars, closes, closes, predictions, rule, RET_5, listings=LISTINGS,
     )
     return run_dir
 

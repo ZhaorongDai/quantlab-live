@@ -28,15 +28,12 @@ from quantlab_live.live.supervisor import (
     Wait,
     what_now,
 )
+from tests.helpers import ny
 
 DAY = "2024-01-03"  # a full session, 09:30 to 16:00
 EARLY = "2024-07-03"  # an early close at 13:00
 HOLIDAY = "2024-07-04"
 BAR = pd.Timestamp("2024-01-02")
-
-
-def ny(day: str, hh_mm: str) -> pd.Timestamp:
-    return pd.Timestamp(f"{day} {hh_mm}", tz="America/New_York").tz_convert("UTC")
 
 
 def schedule(day: str = DAY, at: str = "open_auction") -> DaySchedule:

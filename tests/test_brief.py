@@ -13,22 +13,19 @@ from decimal import Decimal
 
 import pandas as pd
 import pytest
-from quantlab.portfolio.config import TopkDropoutConfig
-from quantlab.portfolio.predefined.topk_dropout import TopkDropoutConstructor
-from quantlab.runs.prediction_panel import LabelSpec
 
 from quantlab_live import records
 from quantlab_live.live import brief
 from quantlab_live.replay import ProportionalSlippage, replay
 from tests.live_fakes import RecordingMailer
-from tests.quantlab_run_fixture import build_constructor_run
+from tests.quantlab_run_fixture import RET_5, build_constructor_run, topk_dropout
 
 A, B, C, BENCHMARK = 10001, 10002, 10003, 90001
 BARS = pd.bdate_range("2024-01-02", periods=4)
 OPEN = {A: [10.0, 10.5, 11.5, 12.5], B: [20.0, 20.5, 21.0, 24.0], C: [50.0, 48.0, 41.0, 45.0]}
 CLOSE = {A: [10.0, 11.0, 12.0, 13.0], B: [20.0, 20.0, 25.0, 25.0], C: [50.0, 40.0, 40.0, 50.0]}
 PREDICTIONS = {"ret_5": {A: [0.03] * 4, B: [0.02] * 4, C: [0.01] * 4}}
-LABELS = [LabelSpec("ret_5", "raw", 1, 5)]
+LABELS = RET_5
 BENCHMARK_CLOSE = [100.0, 101.0, 102.0, 103.0]
 #: The day of the after-open mail; it briefs the close of the bar before it.
 TODAY, CLOSED = BARS[3], BARS[2]
@@ -36,7 +33,7 @@ CENT = Decimal("0.01")
 
 
 def _rule():
-    return TopkDropoutConstructor(TopkDropoutConfig(direction="long_only", topk=2, n_drop=1))
+    return topk_dropout()
 
 
 @pytest.fixture(scope="module")

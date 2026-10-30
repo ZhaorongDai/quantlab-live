@@ -10,6 +10,7 @@ from quantlab_live import records
 from quantlab_live.replay import replay
 from quantlab_live.trading.decision_bar import NEW_YORK
 from tests.quantlab_run_fixture import build_quantlab_run
+from tests.helpers import replay_fills
 
 BARS = pd.bdate_range("2024-01-02", periods=4)
 # Raw prices; the fixture's adjusted group is half of them, so a raw/adjusted
@@ -40,17 +41,7 @@ def replayed(run_dir, tmp_path_factory):
 
 
 def test_each_bars_orders_fill_at_the_next_opening_print(replayed):
-    fills = pd.read_parquet(replayed / "reports" / "fills.parquet")
-    got = sorted(
-        (
-            pd.to_datetime(row.ts_event, utc=True),
-            row.instrument_id,
-            row.order_side,
-            float(row.last_qty),
-            float(row.last_px),
-        )
-        for row in fills.itertuples()
-    )
+    got = _fills(replayed)
     # Bar 0 sizes 10,000 at its closes and fills at bar 1's open; bar 1 keeps;
     # bar 2 sizes its equity of 11,100.50 (cash -249.50, holdings 11,350) in whole
     # shares and fills at bar 3's open; the last bar has no next open.
@@ -117,11 +108,7 @@ def test_records_are_typed_and_keyed_by_bar_timestamp(replayed):
 
 
 def _fills(out_dir) -> list[tuple]:
-    frame = pd.read_parquet(out_dir / "reports" / "fills.parquet")
-    return sorted(
-        (row.ts_event, row.instrument_id, row.order_side, float(row.last_qty), float(row.last_px))
-        for row in frame.itertuples()
-    )
+    return replay_fills(out_dir, "ts", "instrument_id", "side", "qty", "px")
 
 
 def test_a_second_replay_into_a_decided_directory_resumes_its_decisions(run_dir, replayed, tmp_path):

@@ -9,17 +9,14 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
-from quantlab.portfolio.config import TopNConfig
-from quantlab.portfolio.predefined.top_n import TopNConstructor
-from quantlab.runs.prediction_panel import LabelSpec
 
 from quantlab_live import quantlab_gate
 from quantlab_live.quantlab_gate import QuantlabNotReady, open_run
 from quantlab_live.trading.decision_bar import DecisionBar
-from tests.quantlab_run_fixture import ADJUSTED_SCALE, build_constructor_run, build_quantlab_run
+from tests.quantlab_run_fixture import ADJUSTED_SCALE, RET_5, build_constructor_run, build_quantlab_run, top_n
 
 PERMNOS = (10001, 10002, 10003)
-LABELS = [LabelSpec("ret_5", "raw", 1, 5)]
+LABELS = RET_5
 BARS = pd.bdate_range("2024-01-02", periods=6)
 PACKAGE = Path(quantlab_gate.__file__).parent
 
@@ -44,7 +41,7 @@ def closed_run(tmp_path_factory):
     open_, close = _market()
     run_dir, _ = build_constructor_run(
         tmp_path_factory.mktemp("closed"), BARS, open_, close, _predictions(),
-        TopNConstructor(TopNConfig(direction="long_only", top_n=2)), LABELS,
+        top_n(), LABELS,
     )
     return run_dir, close
 
@@ -118,6 +115,10 @@ def test_targets_are_the_rebalance_table_open_loop_and_the_decision_inputs_close
         run.targets("closed")
 
 
+#: The test modules that may import quantlab: the run fixture, which builds real quantlab runs.
+QUANTLAB_FIXTURES = ("quantlab_run_fixture.py",)
+
+
 def test_only_the_gate_imports_quantlab_and_only_its_allowlist():
     found: dict[Path, set[tuple[str, str]]] = {}
     for path in PACKAGE.rglob("*.py"):
@@ -131,6 +132,21 @@ def test_only_the_gate_imports_quantlab_and_only_its_allowlist():
     assert set(found) == {Path(quantlab_gate.__file__)}
     allowed = {(module, name) for module, names in quantlab_gate.QUANTLAB_IMPORTS.items() for name in names}
     assert found[Path(quantlab_gate.__file__)] == allowed
+
+
+def test_the_tests_reach_quantlab_only_through_the_run_fixture():
+    tests = Path(__file__).parent
+    for path in tests.glob("*.py"):
+        if path.name in QUANTLAB_FIXTURES:
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""]
+            elif isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            else:
+                continue
+            assert not any(m.split(".")[0] == "quantlab" for m in modules), f"{path.name} imports {modules}"
 
 
 def test_listings_give_the_ticker_and_primary_exchange_as_of_a_date(tmp_path):

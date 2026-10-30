@@ -11,8 +11,8 @@ from quantlab_live import records
 from quantlab_live.replay import replay
 from quantlab_live.trading.scheduled_execution import ExecutionPlan
 from tests.quantlab_run_fixture import build_quantlab_run
+from tests.helpers import ny
 
-NY = "America/New_York"
 BARS = pd.bdate_range("2024-01-02", periods=3)
 # Bar 0 buys 500, 150 and 40 shares at its closes; the later bars keep them.
 OPEN = {10001: [10.0, 10.5, 11.5], 10002: [20.0, 20.5, 21.0], 10003: [50.0, 48.0, 41.0]}
@@ -34,10 +34,6 @@ class NeverFillsAuctions(FillModel):
         if any(tag.endswith("_auction") for tag in order.tags or []):
             return OrderBook(instrument.id, BookType.L2_MBP)
         return None
-
-
-def ny(day: str, time: str) -> pd.Timestamp:
-    return pd.Timestamp(f"{day} {time}", tz=NY).tz_convert("UTC")
 
 
 def fills(out_dir) -> dict[str, tuple[pd.Timestamp, float, float]]:

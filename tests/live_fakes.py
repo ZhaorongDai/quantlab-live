@@ -16,10 +16,6 @@ from quantlab_live import records
 from quantlab_live.quantlab_gate import Pending, Ready
 
 
-def ny(day: str, hh_mm: str) -> pd.Timestamp:
-    return pd.Timestamp(f"{day} {hh_mm}", tz="America/New_York").tz_convert("UTC")
-
-
 class FakeClock:
     def __init__(self, start: pd.Timestamp, *, stop_at: pd.Timestamp | None = None):
         self.t = start

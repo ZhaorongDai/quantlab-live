@@ -9,8 +9,8 @@ from quantlab_live import records
 from quantlab_live.replay import replay
 from quantlab_live.trading.scheduled_execution import ExecutionPlan
 from tests.quantlab_run_fixture import build_quantlab_run
+from tests.helpers import ny, replay_fills
 
-NY = "America/New_York"
 BARS = pd.bdate_range("2024-01-02", periods=3)
 # Bar 0 buys 500, 150 and 40 shares at its closes; the later bars keep them.
 OPEN = {10001: [10.0, 10.5, 11.5], 10002: [20.0, 20.5, 21.0], 10003: [50.0, 48.0, 41.0]}
@@ -19,16 +19,8 @@ KEEP = float("nan")
 WEIGHTS = {10001: [0.5, KEEP, KEEP], 10002: [0.3, KEEP, KEEP], 10003: [0.2, KEEP, KEEP]}
 
 
-def ny(day: str, time: str) -> pd.Timestamp:
-    return pd.Timestamp(f"{day} {time}", tz=NY).tz_convert("UTC")
-
-
 def fills(out_dir) -> list[tuple]:
-    frame = pd.read_parquet(out_dir / "reports" / "fills.parquet")
-    return sorted(
-        (pd.to_datetime(r.ts_event, utc=True), r.instrument_id, float(r.last_qty), float(r.last_px))
-        for r in frame.itertuples()
-    )
+    return replay_fills(out_dir, "ts", "instrument_id", "qty", "px")
 
 
 def orders(out_dir) -> pd.DataFrame:

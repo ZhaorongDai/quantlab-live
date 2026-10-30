@@ -6,14 +6,11 @@ import pandas as pd
 import pytest
 
 from quantlab_live.trading.scheduled_execution import Action, ExecutionPlan, Session, action
+from tests.helpers import ny
 
 NY = "America/New_York"
 REGULAR = Session.of(pd.Timestamp("2024-01-03 08:00", tz=NY))
 EARLY_CLOSE = Session.of(pd.Timestamp("2024-07-03 08:00", tz=NY))
-
-
-def ny(day: str, time: str) -> pd.Timestamp:
-    return pd.Timestamp(f"{day} {time}", tz=NY).tz_convert("UTC")
 
 
 def test_the_session_is_the_first_whose_close_is_after_now():

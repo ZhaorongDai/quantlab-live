@@ -64,7 +64,8 @@ from quantlab.label.config import ForwardConfig
 from quantlab.label.forward import Forward
 from quantlab.model.config import ModelConfig
 from quantlab.model.predefined.linear import LinearRegressor
-from quantlab.portfolio.config import TopNConfig
+from quantlab.portfolio.config import TopkDropoutConfig, TopNConfig
+from quantlab.portfolio.predefined.topk_dropout import TopkDropoutConstructor
 from quantlab.portfolio.predefined.top_n import TopNConstructor
 from quantlab.portfolio.base import PortfolioConstructor
 from quantlab.runs.prediction_panel import LabelSpec, PredictionPanel
@@ -73,6 +74,20 @@ from quantlab.dataset.crsp import CrspStockDataset
 from quantlab.portfolio.decision_inputs import DecisionInputs
 from quantlab.core.component import walk_components
 from quantlab.runs.record import DataRecorder
+
+#: The prediction label of the closed-loop runs: a five-bar raw forward return.
+RET_5 = [LabelSpec("ret_5", "raw", 1, 5)]
+
+
+def topk_dropout(topk: int = 2, n_drop: int = 1) -> TopkDropoutConstructor:
+    """qlib's TopkDropout rule, long only: the closed-loop runs' construction."""
+    return TopkDropoutConstructor(TopkDropoutConfig(direction="long_only", topk=topk, n_drop=n_drop))
+
+
+def top_n(n: int = 2) -> TopNConstructor:
+    """quantlab's top-N rule, long only."""
+    return TopNConstructor(TopNConfig(direction="long_only", top_n=n))
+
 
 #: Where a quantlab run with a model keeps its prediction panel; the fixture
 #: writes one into a model-free run (the one place outside quantlab that names

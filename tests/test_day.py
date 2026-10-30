@@ -23,8 +23,8 @@ from tests.live_fakes import (
     crashes_at,
     fails_to_start,
     finishes_at,
-    ny,
 )
+from tests.helpers import ny
 
 DAY = "2024-01-03"
 BAR = pd.Timestamp("2024-01-02")

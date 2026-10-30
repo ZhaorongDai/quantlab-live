@@ -9,6 +9,7 @@ import pytest
 from quantlab_live import records
 from quantlab_live.replay import ProportionalSlippage, replay
 from tests.quantlab_run_fixture import build_quantlab_run
+from tests.helpers import replay_fills
 
 KEEP = np.nan
 BARS = pd.bdate_range("2024-01-02", periods=6)
@@ -18,17 +19,7 @@ NO_DIVIDEND = [0.0] * 6
 
 def _fills(out_dir) -> list[tuple]:
     """The replay's fills: (instrument, side, raw-or-unit quantity, price, commission)."""
-    fills = pd.read_parquet(out_dir / "reports" / "fills.parquet")
-    return sorted(
-        (
-            row.instrument_id,
-            row.order_side,
-            float(row.last_qty),
-            float(row.last_px),
-            float(str(row.commission).split()[0]),
-        )
-        for row in fills.itertuples()
-    )
+    return replay_fills(out_dir, "instrument_id", "side", "qty", "px", "fee")
 
 
 @pytest.fixture(scope="module")
