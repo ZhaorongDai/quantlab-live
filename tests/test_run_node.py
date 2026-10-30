@@ -23,7 +23,7 @@ from quantlab_live import records
 from quantlab_live.cli import main
 from quantlab_live.live import run_node
 from quantlab_live.live.guards import ARMING_FILE
-from quantlab_live.live.node import ARCHIVE_DIR, DRY_RUN_DIR
+from quantlab_live.live.node import ARCHIVE_DIR, DRY_RUN_DIR, claimed_instruments
 from quantlab_live.trading.scheduled_execution import Session
 from tests.fake_broker import fake_profile
 from tests.quantlab_run_fixture import build_constructor_run
@@ -209,3 +209,16 @@ def test_a_real_money_start_without_its_arming_file_is_refused(live_dir, run_dir
     assert not report.started
     assert "the arming file is missing" in report.error
     assert "initial_capital is not set" in report.error
+
+
+def test_a_restart_that_lost_its_cache_claims_what_the_days_decision_trades(live_dir):
+    # Held C at the last close; today's decision buys A and B, so a restart without
+    # Redis must claim the positions and orders of A and B too (they are its own).
+    held = pd.DataFrame({"quantity": [5.0]}, index=pd.Index([C], name="symbol"))
+    records.write_snapshot(live_dir, records.Snapshot(BAR, held, 9_750.0))
+    run_node(live_dir, DATE, dry_run=True, broker=fake_profile(PRICES)[0], redis=False)
+    decision = records.read_decision(live_dir / DRY_RUN_DIR, BAR)
+
+    claims = claimed_instruments(records.read_security_map(live_dir), records.latest_snapshot(live_dir, DATE), decision)
+
+    assert {i.value for i in claims} == {"AAA=STK.SMART", "BBB=STK.SMART", "CCC=STK.SMART"}

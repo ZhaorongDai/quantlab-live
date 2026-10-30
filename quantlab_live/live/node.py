@@ -171,13 +171,14 @@ def _run(
         except QuantlabNotReady as error:
             return write(error=f"quantlab is not ready: {error}")
 
+    decisions = DirectoryDecisions(live_dir / DRY_RUN_DIR if dry_run else live_dir)
     snapshot = records.latest_snapshot(live_dir, date)
-    held = [] if snapshot is None else [security_map.to_id(s) for s in snapshot.positions.index]
-    held = [i for i in held if i is not None]
-    # At takeover (no snapshot yet) the strategy claims every mapped instrument.
-    claims = held if snapshot is not None else security_map.ids()
-    exec_clients = profile.exec_clients(held)
-    data_clients = profile.data_clients(held)
+    decision = decisions.read(bar)
+    claims = claimed_instruments(security_map, snapshot, decision)
+    # Only the held and decided instruments load at the start; a new target loads at runtime.
+    loaded = claimed_instruments(security_map, snapshot or _NOTHING_HELD, decision)
+    exec_clients = profile.exec_clients(loaded)
+    data_clients = profile.data_clients(loaded)
     simulated = profile.simulated
     environment = Environment.SANDBOX if simulated else Environment.LIVE
 
@@ -220,7 +221,6 @@ def _run(
         write(error=reason)
         handle.stop()
 
-    decisions = DirectoryDecisions(live_dir / DRY_RUN_DIR if dry_run else live_dir)
     data_client = ClientId(data_clients[0].name) if data_clients else None
     components = trading.parts(
         run, decisions, loop="closed", plan=config.plan, security_map=security_map,
@@ -276,6 +276,41 @@ def decision_bar_of(date) -> pd.Timestamp:
     """
     calendar = exchange_calendars.get_calendar("XNYS")
     return pd.Timestamp(calendar.previous_session(pd.Timestamp(date).normalize())).tz_localize(None)
+
+
+def claimed_instruments(security_map, snapshot: records.Snapshot | None, decision: pd.DataFrame | None) -> list:
+    """Return the instruments whose positions and orders the strategy claims at start-up reconciliation.
+
+    At takeover (no snapshot yet) the strategy claims every instrument
+    mapped on the day. After it, it claims what it held at the last
+    snapshot and what the day's decision trades, so a position or a
+    working order it opened today is still its own after a restart that
+    lost the cache: counted in its holdings and in ``remaining_orders``.
+    A symbol the decision skips (unmapped, or foreign) is not claimed.
+
+    Examples
+    --------
+    >>> from nautilus_trader.model import InstrumentId
+    >>> ids = {s: InstrumentId.from_str(f"{t}.NYSE") for s, t in [(1, "AAA"), (2, "BBB"), (3, "CCC"), (4, "DDD")]}
+    >>> security_map = records.SecurityMap().updated("2024-01-08", ids)
+    >>> held = records.Snapshot(pd.Timestamp("2024-01-05"), pd.DataFrame({"quantity": [10.0]}, index=[1]), 0.0)
+    >>> decision = pd.DataFrame({"order_quantity": [5.0, 0.0, 7.0], "skip": ["", "", "foreign"]}, index=[2, 3, 4])
+    >>> [i.value for i in claimed_instruments(security_map, held, decision)]
+    ['AAA.NYSE', 'BBB.NYSE']
+    >>> len(claimed_instruments(security_map, None, decision))
+    4
+    """
+    if snapshot is None:
+        return security_map.ids()
+    symbols = list(snapshot.positions.index)
+    if decision is not None:
+        traded = decision[(decision["order_quantity"] != 0) & (decision["skip"].fillna("") == "")]
+        symbols += [s for s in traded.index if s not in symbols]
+    ids = (security_map.to_id(s) for s in symbols)
+    return [i for i in ids if i is not None]
+
+
+_NOTHING_HELD = records.Snapshot(pd.Timestamp(0), pd.DataFrame({"quantity": []}), 0.0)
 
 
 def state_alerts(cache, security_map) -> list[str]:
