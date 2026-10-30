@@ -41,7 +41,6 @@ own reports under ``reports/`` stay in the engine's units.
 
 from __future__ import annotations
 
-import contextlib
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -61,7 +60,6 @@ from nautilus_trader.model import (
     CustomData,
     DataType,
     Equity,
-    ExecAlgorithmId,
     InstrumentClose,
     InstrumentCloseType,
     InstrumentId,
@@ -77,18 +75,15 @@ from nautilus_trader.model import (
     Venue,
 )
 
-from quantlab_live import brokers, records
+from quantlab_live import brokers, records, trading
 from quantlab_live.quantlab_gate import PRICE_PRECISION, open_run
 from quantlab_live.trading.decision_bar import NEW_YORK, DecisionBar, decision_ns
-from quantlab_live.trading.outcomes import order_frames, order_outcomes
+from quantlab_live.trading.outcomes import order_bar, order_frames, order_outcomes
 from quantlab_live.trading.scheduled_execution import (
     AUCTION_LIFE,
     ExecutionPlan,
-    ScheduledExecution,
     Session,
 )
-from quantlab_live.trading.strategy import BAR_TAG, QuantlabStrategy
-from quantlab_live.trading.targets import ConstructorTargets, RebalanceTableTargets
 
 SIM = Venue("SIM")
 USD = Currency.from_str("USD")
@@ -376,18 +371,14 @@ def replay(
             again = DecisionBar(bar=latest[-1].bar, payload=latest[-1].payload, ts_event=restart, ts_init=restart)
             published.append(CustomData(DataType(DecisionBar.__name__), again))
     engine.add_data(published, client_id=ClientId("QUANTLAB"))
-    algorithm_id = ExecAlgorithmId("SCHEDULED")
-    algorithm = ScheduledExecution(algorithm_id, plan, Environment.BACKTEST)
-    engine.add_exec_algorithm(algorithm)
-    if loop == "closed":
-        inputs = run.targets("closed", end=end)
-        targets, preload = ConstructorTargets(inputs), inputs.preloaded(start, end)
-    else:
-        targets, preload = RebalanceTableTargets(run.targets("open")), contextlib.nullcontext()
     decisions = _ReplayDecisions(out_dir, splits)
-    strategy = QuantlabStrategy(targets, security_map, algorithm_id, decisions)
-    engine.add_strategy(strategy)
-    with preload:
+    components = trading.parts(
+        run, decisions, loop=loop, plan=plan, security_map=security_map,
+        environment=Environment.BACKTEST, end=end,
+    )
+    components.add_to(engine)
+    strategy, algorithm = components.strategy, components.exec_algorithm
+    with components.preloaded(start, end):
         for restart in restarts:
             engine.run(end=restart - 1, streaming=True)
             algorithm.clock.cancel_timers()  # lost with the crashed process
@@ -476,7 +467,7 @@ def _outcomes(
     decision bar if none was.
     """
     frame, fills = order_frames(orders, security_map.to_symbol)
-    frame["bar"] = frame["tags"].map(_bar_of)
+    frame["bar"] = frame["tags"].map(order_bar)
     result = {}
     for bar, decision in decided.items():
         mine = frame[frame["bar"] == bar]
@@ -491,12 +482,6 @@ def _outcomes(
             outcomes.loc[symbol, "avg_px"] /= ratio
         result[bar] = outcomes
     return result
-
-
-def _bar_of(tags) -> pd.Timestamp:
-    """The decision bar named by an order's ``bar_tag``."""
-    (tag,) = (t for t in tags if t.startswith(BAR_TAG))
-    return pd.Timestamp(tag.removeprefix(BAR_TAG))
 
 
 def _in_units(bar: DecisionBar, splits: SplitTable) -> DecisionBar:

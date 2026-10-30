@@ -34,6 +34,9 @@ from nautilus_trader.model import OrderFilled, OrderPendingCancel, OrderSide
 
 from quantlab_live.trading.scheduled_execution import AUCTIONS, CHILD_TAG
 
+#: The prefix of the order tag naming an order's decision bar.
+BAR_TAG = "bar="
+
 FILLED = "filled"
 PARTIALLY_FILLED = "partially_filled"
 CANCELLED = "cancelled"
@@ -158,6 +161,18 @@ def _status(row: pd.Series, orders: pd.DataFrame, filled: float, position: float
     if len(ended):
         return CANCELLED
     return UNVERIFIED
+
+
+def order_bar(tags) -> pd.Timestamp | None:
+    """Return the decision bar an order's ``bar=`` tag names; ``None`` without one.
+
+    Examples
+    --------
+    >>> order_bar(["bar=2024-01-02", "close=10.0"]), order_bar([])
+    (Timestamp('2024-01-02 00:00:00'), None)
+    """
+    named = [t for t in tags or [] if t.startswith(BAR_TAG)]
+    return pd.Timestamp(named[0].removeprefix(BAR_TAG)) if named else None
 
 
 def order_frames(orders, symbol_of) -> tuple[pd.DataFrame, pd.DataFrame]:

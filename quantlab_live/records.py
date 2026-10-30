@@ -384,6 +384,16 @@ class SecurityMap:
         """Return ``symbol``'s instrument id on the map's day; ``None`` when unmapped."""
         return self._today.get(int(symbol))
 
+    def ids(self) -> list[InstrumentId]:
+        """Return every instrument id mapped on the map's day.
+
+        Examples
+        --------
+        >>> SecurityMap().updated("2024-01-02", {1: InstrumentId.from_str("FB.NASDAQ"), 2: None}).ids()
+        [InstrumentId('FB.NASDAQ')]
+        """
+        return list(self._today.values())
+
     def to_symbol(self, instrument_id: InstrumentId) -> int | None:
         """Return the symbol that last held ``instrument_id``; ``None`` for an id never mapped."""
         symbol = self._back.get(instrument_id.value)

@@ -143,31 +143,37 @@ class Run:
     _dataset: MarketDataset
     _market: Market
 
-    def bars(self, start=None, end=None) -> Iterator[DecisionBar]:
+    def bars(self, start=None, end=None, *, store=None) -> Iterator[DecisionBar]:
         """Yield the decision bar of every dataset bar from ``start`` to ``end``.
 
         Each bar carries, by symbol of the run's universe, the raw close
         (carried forward over missing bars; on a delisting bar the security's
         last valuation in raw prices: its last raw close grown by the
         valuation column's return since), whether it delists at the bar, and
-        the bar's predictions when the run has a prediction panel.
+        the bar's predictions when the run has a prediction panel, or from
+        the live prediction store ``store``.
 
         Parameters
         ----------
         start, end : datetime-like, optional
             Default to the run's window.
+        store : path-like, optional
+            The run's live prediction store (``prepare_day``): the
+            predictions of bars past the run's end are read from it instead
+            of the run's prediction panel.
 
         Raises
         ------
         QuantlabNotReady
-            If the dataset, or the prediction panel of a run with one, has no
-            data for a bar up to ``end``.
+            If the dataset, or the predictions read (the prediction panel of
+            a run with one, or ``store``), has no data for a bar up to ``end``.
 
         Examples
         --------
         ::
 
             last = list(run.bars(end=run.window[1]))[-1]
+            (today,) = run.bars(bar, bar, store=live_dir / "live_predictions.zarr")
         """
         start = self.window[0] if start is None else pd.Timestamp(start)
         end = self.window[1] if end is None else pd.Timestamp(end)
@@ -175,7 +181,12 @@ class Run:
         if not len(calendar) or calendar[-1] < end.normalize():
             raise QuantlabNotReady(f"the price dataset has no bar at {end.date()} yet")
         predictions = None
-        if self._backtest_run.has_predictions:
+        if store is not None:
+            live = LivePredictionStore(store)
+            if not live.exists or not len(live.bars()) or live.bars()[-1] < calendar[-1]:
+                raise QuantlabNotReady(f"the live prediction store has no bar at {calendar[-1].date()} yet")
+            predictions = live.panel(calendar[0], calendar[-1])
+        elif self._backtest_run.has_predictions:
             predictions = self._backtest_run.predictions().predictions
             have = pd.DatetimeIndex(predictions.indexes["timestamp"])
             if have[-1] < calendar[-1]:

@@ -128,7 +128,7 @@ LOADED = {InstrumentId.from_str("BRK-B.NYSE"), InstrumentId.from_str("META.NASDA
 
 
 def test_ibkr_profiles_trade_through_ib_with_simplified_ids():
-    paper, real = profile("ibkr_paper", account_id="DU123"), profile("ibkr_real", account_id="U123")
+    paper, real = profile("ibkr_paper", port=4002, account_id="DU123"), profile("ibkr_real", port=4001, account_id="U123")
     assert (paper.real_money, real.real_money) == (False, True)
     for broker in (paper, real):
         (data,) = broker.data_clients(LOADED)
@@ -147,7 +147,7 @@ def test_ibkr_profiles_trade_through_ib_with_simplified_ids():
 
 def test_ib_sandbox_takes_ib_data_and_fills_in_a_sandbox_on_the_smart_venue():
     loaded = {InstrumentId.from_str("BRK B=STK.SMART")}
-    sandbox = profile("ib_sandbox", starting_cash=10_000.0)
+    sandbox = profile("ib_sandbox", port=4002, starting_cash=10_000.0)
     assert not sandbox.real_money
     (data,) = sandbox.data_clients(loaded)
     (execution,) = sandbox.exec_clients(loaded)
@@ -163,7 +163,14 @@ def test_ib_sandbox_takes_ib_data_and_fills_in_a_sandbox_on_the_smart_venue():
 
 def test_ib_sandbox_needs_its_starting_cash():
     with pytest.raises(ValueError, match="starting_cash"):
-        profile("ib_sandbox").exec_clients(set())
+        profile("ib_sandbox", port=4002).exec_clients(set())
+
+
+@pytest.mark.parametrize("name", ["ibkr_paper", "ibkr_real", "ib_sandbox"])
+def test_an_ib_client_needs_an_explicit_port(name):
+    broker = profile(name, account_id="DU123", starting_cash=10_000.0)
+    with pytest.raises(ValueError, match="port"):
+        broker.data_clients(set())
 
 
 def test_a_profile_exists_for_real_brokers_only():

@@ -363,6 +363,7 @@ def build_constructor_run(
     slippage: float = 0.0,
     variables: Mapping[str, Mapping[int, Sequence[float]]] | None = None,
     benchmark: tuple[Mapping[int, Sequence[float]], Mapping[int, Sequence[float]]] | None = None,
+    listings: Mapping[int, Sequence[tuple[str | None, str, str | None]]] | None = None,
 ) -> tuple[Path, list[str]]:
     """Write a CRSP-shaped store and a closed-loop-ready quantlab run; return it.
 
@@ -374,10 +375,13 @@ def build_constructor_run(
     raw ``(open, close)`` of one PERMNO over ``bars``, written to its own
     store as the run's benchmark (``build_quantlab_run``'s). Returns the run
     directory and the ISO timestamps of the bars ``DecisionInputs.weights``
-    held after a failure.
+    held after a failure. ``listings`` makes the store a Sharadar store with
+    that ticker sidecar (``build_quantlab_run``'s).
     """
     root = Path(root)
     dataset = _crsp_dataset(root, bars, open_, close, variables=variables)
+    if listings is not None:
+        dataset = _sharadar_dataset(dataset, listings)
     if not isinstance(rule, PortfolioConstructor):
         rule = rule(dataset)
     window = bars[first_bar:]

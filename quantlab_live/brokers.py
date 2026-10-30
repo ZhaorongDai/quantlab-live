@@ -255,6 +255,30 @@ def map_builder(listing_id: Callable[[str | None, str | None], InstrumentId | No
     return build_map
 
 
+#: The trading mode of the IB Gateway's and TWS's default API ports.
+IB_PORT_MODES = {4001: "live", 7496: "live", 4002: "paper", 7497: "paper"}
+
+
+def ib_account_mode(account_id: str | None) -> str | None:
+    """Return the trading mode of an IB account id: ``paper`` (``DU…``), ``live`` (``U…``) or ``None``.
+
+    NautilusTrader's account ids carry the venue first (``IB-DU123``); it is ignored.
+
+    Examples
+    --------
+    >>> ib_account_mode("DU123"), ib_account_mode("IB-U456"), ib_account_mode("SANDBOX-001")
+    ('paper', 'live', None)
+    """
+    if not account_id:
+        return None
+    number = account_id.rsplit("-", 1)[-1]
+    if number.startswith("DU"):
+        return "paper"
+    if number.startswith("U"):
+        return "live"
+    return None
+
+
 @dataclass(frozen=True)
 class Client:
     """A NautilusTrader client of a node: ``LiveNodeBuilder.add_data_client`` or ``add_exec_client``.
@@ -270,12 +294,16 @@ class Client:
     simulated : bool
         Whether it is a simulated execution client
         (``add_simulated_exec_client``).
+    account_id : str, optional
+        The NautilusTrader account id an execution client trades for
+        (``IB-DU123``): the account the broker must report at the start.
     """
 
     name: str
     factory: Any
     config: Any
     simulated: bool = False
+    account_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -299,6 +327,9 @@ class BrokerProfile:
         ``map_builder``.
     fee_model : callable
         ``fee_model(shares_per_unit=None) -> FeeModel``.
+    simulated : bool
+        Whether its orders fill in a simulated venue (a sandbox), never at
+        the broker.
     """
 
     name: str
@@ -307,6 +338,7 @@ class BrokerProfile:
     exec_clients: Callable[[Collection[InstrumentId]], tuple[Client, ...]]
     build_map: MapBuilder
     fee_model: Callable[..., FeeModel]
+    simulated: bool = False
 
 
 #: The profiles ``profile`` knows.
@@ -329,7 +361,9 @@ def profile(
     name : {"ibkr_paper", "ibkr_real", "ib_sandbox"}
         The profile.
     host, port : optional
-        The IB Gateway's API address; NautilusTrader's defaults when unset.
+        The IB Gateway's API address. Building a client needs the port:
+        NautilusTrader would otherwise fall back to its own default port,
+        which may be the other trading mode's.
     client_id : int, default 1
         The IB API client id of the data client; the IB execution client
         takes the next one.
@@ -345,11 +379,15 @@ def profile(
 
     Examples
     --------
-    >>> paper = profile("ibkr_paper", account_id="DU123")
+    >>> paper = profile("ibkr_paper", port=4002, account_id="DU123")
     >>> paper.real_money, [c.name for c in paper.exec_clients({InstrumentId.from_str("BRK-B.NYSE")})]
     (False, ['IB'])
     >>> profile("ib_sandbox", starting_cash=10_000).exec_clients(set())[0].config.venue
     Venue('SMART')
+    >>> profile("ibkr_real", account_id="U123").exec_clients(set())
+    Traceback (most recent call last):
+    ...
+    ValueError: the ibkr_real profile needs the IB Gateway's port
     >>> profile("sim")
     Traceback (most recent call last):
     ...
@@ -371,7 +409,12 @@ def profile(
             symbology_method=SymbologyMethod.SIMPLIFIED, load_ids=set(instrument_ids)
         )
 
+    def need_port() -> None:
+        if port is None:
+            raise ValueError(f"the {name} profile needs the IB Gateway's port")
+
     def data_clients(instrument_ids: Collection[InstrumentId]) -> tuple[Client, ...]:
+        need_port()
         config = InteractiveBrokersDataClientConfig(
             **gateway, client_id=client_id, instrument_provider=provider(instrument_ids)
         )
@@ -379,13 +422,15 @@ def profile(
 
     def exec_clients(instrument_ids: Collection[InstrumentId]) -> tuple[Client, ...]:
         if not sandbox:
+            need_port()
             config = InteractiveBrokersExecutionClientConfig(
                 **gateway,
                 client_id=client_id + 1,
                 account_id=account_id,
                 instrument_provider=provider(instrument_ids),
             )
-            return (Client("IB", InteractiveBrokersExecutionClientFactory(), config),)
+            account = None if account_id is None else f"IB-{account_id}"
+            return (Client("IB", InteractiveBrokersExecutionClientFactory(), config, account_id=account),)
         if starting_cash is None:
             raise ValueError("the ib_sandbox profile needs its starting_cash")
         config = SandboxExecutionClientConfig(
@@ -406,4 +451,5 @@ def profile(
         exec_clients=exec_clients,
         build_map=map_builder(smart_id if sandbox else primary_exchange_id),
         fee_model=IbkrFeeModel,
+        simulated=sandbox,
     )

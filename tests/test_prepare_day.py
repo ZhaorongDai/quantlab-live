@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quantlab_live.quantlab_gate import Pending, Ready, prepare_day
+from quantlab_live.quantlab_gate import Pending, QuantlabNotReady, Ready, open_run, prepare_day
 from tests.quantlab_run_fixture import build_model_run
 
 PERMNOS = (10001, 10002, 10003, 10004)
@@ -135,3 +135,19 @@ def test_a_store_of_another_run_is_refused(model_run, taskset, tmp_path):
     with pytest.raises(ValueError, match="another run"):
         prepare_day(model_run.run_dir, TODAY, store=store, data_root=data_root)
     assert len(_calls(taskset)) == 1
+
+
+def test_the_day_bar_reads_its_predictions_from_the_live_store(model_run, taskset, tmp_path):
+    data_root, store = tmp_path / "data", tmp_path / "live" / "live_predictions.zarr"
+    t = model_run.vendor_update()
+    run = open_run(model_run.run_dir)
+    with pytest.raises(QuantlabNotReady, match="live prediction store"):
+        list(run.bars(t, t, store=store))
+    _status(data_root, TODAY, "done")
+    assert prepare_day(model_run.run_dir, TODAY, store=store, data_root=data_root) == Ready(t)
+
+    (bar,) = open_run(model_run.run_dir).bars(t, t, store=store)
+    predictions = bar.predictions()
+    assert bar.timestamp == t and len(predictions.data_vars) >= 1
+    name = next(iter(predictions.data_vars))
+    assert np.isfinite(predictions[name].values).any()

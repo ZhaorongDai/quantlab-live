@@ -17,6 +17,7 @@ from typing import Protocol
 
 import pandas as pd
 from nautilus_trader.model import (
+    ClientId,
     CustomData,
     DataType,
     ExecAlgorithmId,
@@ -31,6 +32,7 @@ from nautilus_trader.trading import Strategy, StrategyConfig
 
 from quantlab_live import records
 from quantlab_live.trading import outcomes
+from quantlab_live.trading.outcomes import BAR_TAG
 from quantlab_live.trading.decision_bar import DecisionBar
 from quantlab_live.trading.scheduled_execution import MARK_TAG
 
@@ -98,12 +100,14 @@ class DirectoryDecisions:
         records.write_decision(self._directory, bar, decision)
 
 
-def _config() -> StrategyConfig:
-    return StrategyConfig(strategy_id=StrategyId("QUANTLAB-001"))
+#: The strategy's id: one strategy per trader.
+STRATEGY_ID = StrategyId("QUANTLAB-001")
 
 
-#: The prefix of the order tag naming an order's decision bar.
-BAR_TAG = "bar="
+def _config(external_order_claims=()) -> StrategyConfig:
+    return StrategyConfig(strategy_id=STRATEGY_ID, external_order_claims=list(external_order_claims))
+
+
 
 
 def bar_tag(bar: pd.Timestamp) -> str:
@@ -144,6 +148,16 @@ class QuantlabStrategy(Strategy):
         The execution algorithm every order is sent to.
     decisions : DecisionRecords
         Where the decisions are kept.
+    external_order_claims : sequence of InstrumentId, optional
+        The instruments whose orders and positions the strategy claims from
+        start-up reconciliation (live): its holdings.
+    instrument_client : ClientId, optional
+        The data client to request an instrument from when an order's
+        instrument is not loaded yet (live). The order is submitted once the
+        instrument arrives; one the client cannot find is left unsent.
+    dry_run : bool, default False
+        Decide and write the decision, but submit nothing: the orders that
+        would be submitted are kept in ``planned``.
 
     Examples
     --------
@@ -152,9 +166,9 @@ class QuantlabStrategy(Strategy):
         strategy = QuantlabStrategy(targets, security_map, ExecAlgorithmId("SCHEDULED"), DirectoryDecisions(live_dir))
     """
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args, external_order_claims=(), **kwargs):
         # The native base reads its configuration in __new__, not __init__.
-        return super().__new__(cls, _config())
+        return super().__new__(cls, _config(external_order_claims))
 
     def __init__(
         self,
@@ -162,12 +176,22 @@ class QuantlabStrategy(Strategy):
         security_map: SecurityMap,
         exec_algorithm_id: ExecAlgorithmId,
         decisions: DecisionRecords,
+        *,
+        external_order_claims=(),
+        instrument_client: ClientId | None = None,
+        dry_run: bool = False,
     ):
-        super().__init__(_config())
+        super().__init__(_config(external_order_claims))
         self._targets = targets
         self._map = security_map
         self._exec_algorithm_id = exec_algorithm_id
         self._decisions = decisions
+        self._instrument_client = instrument_client
+        self._dry_run = dry_run
+        #: Orders waiting for their instrument: (bar, symbol, quantity, close).
+        self._waiting: list[tuple[pd.Timestamp, int, float, float]] = []
+        #: A dry run's orders: bar, symbol, instrument id and signed quantity.
+        self.planned: list[dict] = []
         #: The first error a decision raised, with its bar; the strategy decides
         #: nothing after it. NautilusTrader logs a handler's error and carries
         #: on, so whoever runs the strategy reads this.
@@ -222,16 +246,41 @@ class QuantlabStrategy(Strategy):
         self._submit(bar, remaining, decision["close"])
 
     def _submit(self, bar: pd.Timestamp, quantities: pd.Series, close: pd.Series) -> None:
+        missing = []
         for symbol, quantity in quantities.items():
-            order = self.order_factory.market(
-                self._map.to_id(symbol),
-                OrderSide.BUY if quantity > 0 else OrderSide.SELL,
-                Quantity(abs(quantity), 0),
-                time_in_force=TimeInForce.DAY,
-                exec_algorithm_id=self._exec_algorithm_id,
-                tags=[bar_tag(bar), MARK_TAG + repr(float(close[symbol]))],
-            )
-            self.submit_order(order)
+            instrument_id = self._map.to_id(symbol)
+            if self._dry_run:
+                self.planned.append(
+                    {"bar": bar, "symbol": int(symbol), "instrument_id": str(instrument_id), "quantity": float(quantity)}
+                )
+            elif self._instrument_client is not None and self.cache.instrument(instrument_id) is None:
+                self._waiting.append((bar, symbol, float(quantity), float(close[symbol])))
+                missing.append(instrument_id)
+            else:
+                self._send(bar, symbol, float(quantity), float(close[symbol]))
+        if missing:
+            self.log.info(f"requesting {len(missing)} instruments not loaded yet")
+            self.request_instrument(missing, client_id=self._instrument_client, callback=self._on_instruments)
+
+    def _on_instruments(self, request_id) -> None:
+        """Submit the orders whose instrument a runtime request loaded."""
+        waiting, self._waiting = self._waiting, []
+        for bar, symbol, quantity, close in waiting:
+            if self.cache.instrument(self._map.to_id(symbol)) is None:
+                self.log.error(f"{self._map.to_id(symbol)} could not be loaded; symbol {symbol} is not sent")
+                continue
+            self._send(bar, symbol, quantity, close)
+
+    def _send(self, bar: pd.Timestamp, symbol: int, quantity: float, close: float) -> None:
+        order = self.order_factory.market(
+            self._map.to_id(symbol),
+            OrderSide.BUY if quantity > 0 else OrderSide.SELL,
+            Quantity(abs(quantity), 0),
+            time_in_force=TimeInForce.DAY,
+            exec_algorithm_id=self._exec_algorithm_id,
+            tags=[bar_tag(bar), MARK_TAG + repr(close)],
+        )
+        self.submit_order(order)
 
     def _skips(self, decision: pd.DataFrame) -> pd.Series:
         """Why each ordered symbol is not traded: ``unmapped``, ``foreign`` or ``""``."""
@@ -263,18 +312,34 @@ class QuantlabStrategy(Strategy):
         return frame.astype(float)
 
     def _cash(self, close: pd.Series) -> float:
-        """The account's cash: its balance less the cost of every open position.
+        """The account's cash (``account_cash``) on the venue the bar's instruments trade on.
 
-        The account is the one of the venue the bar's instruments trade on.
         A position the strategy does not own, or cannot map, costs cash but
         adds no value to the strategy capital.
         """
         ids = (self._map.to_id(symbol) for symbol in close.index)
         venue = next(i for i in ids if i is not None).venue
-        account = self.cache.account_for_venue(venue)
-        balance = float(account.balance_total().as_decimal())
-        positions = self.cache.positions_open(venue=venue)
-        return balance - sum(float(p.signed_qty) * float(p.avg_px_open) for p in positions)
+        return account_cash(self.cache, self.cache.account_for_venue(venue))
+
+
+def account_cash(cache, account) -> float:
+    """Return an account's cash: its balance less the cost of its every open position.
+
+    Parameters
+    ----------
+    cache : nautilus_trader.common.Cache
+    account : nautilus_trader account
+        A MARGIN account, whose balance does not pay for its positions.
+
+    Examples
+    --------
+    ::
+
+        cash = account_cash(node.cache, node.cache.account_for_venue(Venue("SMART")))
+    """
+    balance = float(account.balance_total().as_decimal())
+    positions = cache.positions_open(account_id=account.id)
+    return balance - sum(float(p.signed_qty) * float(p.avg_px_open) for p in positions)
 
 
 def _is_primary(order) -> bool:

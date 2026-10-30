@@ -9,11 +9,14 @@ key has a default, and ``status`` prints them all, so a default never hides.
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from quantlab_live import brokers
+from quantlab_live.brokers import BrokerProfile
 from quantlab_live.quantlab_gate import NUMA_NODE_1_CPUS
 from quantlab_live.trading.scheduled_execution import ExecutionPlan
 
@@ -64,7 +67,28 @@ class LiveConfig:
     cpus : str
         The CPU list every job of the day is bound to (NUMA node 1).
     redis_host, redis_port, redis_db :
-        The node's cache database.
+        The node's cache database. NautilusTrader 2.0.0rc8 cannot select a
+        Redis database, so ``redis_db`` must stay 0: paper and real money
+        use separate Redis instances.
+    redis : bool, default True
+        Whether the node keeps its cache in Redis; a node without it
+        restores nothing at a restart (tests only).
+    gateway_host : str, default ``"127.0.0.1"``
+        The IB Gateway's API host.
+    gateway_port : int, optional
+        The IB Gateway's API port; an IB profile requires it.
+    client_id : int, default 1
+        The IB API client id of the node's data client; its execution
+        client takes the next one.
+    account_id : str, optional
+        The IB account; the ``TWS_ACCOUNT`` environment variable by default.
+    starting_cash : float, optional
+        The ``ib_sandbox`` account's starting cash.
+    stop_after_close_minutes : int, default 10
+        How long after the close the trading node stops.
+    min_node_seconds : int, default 15
+        The least a node runs after its start, so a settle-only node, or a
+        node started after its stop time, still restores and reconciles.
     trader_id : str, optional
         The node's fixed trader id; derived from the live directory's name.
 
@@ -103,6 +127,14 @@ class LiveConfig:
     redis_port: int = 6379
     redis_db: int = 0
     trader_id: str | None = None
+    redis: bool = True
+    gateway_host: str = "127.0.0.1"
+    gateway_port: int | None = None
+    client_id: int = 1
+    account_id: str | None = None
+    starting_cash: float | None = None
+    stop_after_close_minutes: int = 10
+    min_node_seconds: int = 15
     #: Not a key: the directory the paths are relative to.
     live_dir: Path = field(default=Path("."), repr=False)
 
@@ -110,6 +142,8 @@ class LiveConfig:
         self.plan  # noqa: B018 - validates the plan
         if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", self.start_after):
             raise ValueError(f"start_after must be 'HH:MM', not {self.start_after!r}")
+        if self.redis_db != 0:
+            raise ValueError("redis_db must be 0: NautilusTrader 2.0.0rc8 cannot select a Redis database")
 
     @property
     def plan(self) -> ExecutionPlan:
@@ -143,6 +177,18 @@ class LiveConfig:
             return self.trader_id
         name = re.sub(r"[^A-Za-z0-9]", "", self.live_dir.absolute().name).upper()
         return f"QL-{name or 'LIVE'}"
+
+    @property
+    def ib_account(self) -> str | None:
+        """The IB account: ``account_id``, or the ``TWS_ACCOUNT`` environment variable."""
+        return self.account_id or os.environ.get("TWS_ACCOUNT") or None
+
+    def profile(self) -> BrokerProfile:
+        """The broker profile, connected as configured (``brokers.profile``)."""
+        return brokers.profile(
+            self.broker, host=self.gateway_host, port=self.gateway_port, client_id=self.client_id,
+            account_id=self.ib_account, starting_cash=self.starting_cash,
+        )
 
     def effective(self) -> dict:
         """Every key with its effective value, defaults included, paths resolved.

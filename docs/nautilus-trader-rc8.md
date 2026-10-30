@@ -104,9 +104,31 @@ Each entry gives the limitation, the workaround and where it lives, and how to c
 28. **SMART ids carry a SMART primary exchange.** Loading a raw `...=STK.SMART` id makes the IB adapter build a contract with primary exchange `SMART`, which IB may reject.
     - Check: the `ib_sandbox` smoke test (#11).
 
-29. **The sandbox may not call Python fee models.** Whether the Rust sandbox execution client calls a Python `FeeModel` is unverified.
-    - Check: the `ib_sandbox` smoke test (#11).
+29. **The sandbox calls Python fee models.** Checked on rc8 (#11): a `LiveNode` with the sandbox execution client charged `IbkrFeeModel`'s USD 1.00 minimum on a 5-share fill. No workaround is needed.
+    - Check: the `ib_sandbox` smoke test asserts every outcome's `fees` is at least the minimum (`tests/test_ib_sandbox.py`).
 
 30. **`SymbologyMethod` has no name.** A Python `SymbologyMethod` has no `.name`.
 
-31. **IB configs default the port.** With no port given, the IB configs fall back to NautilusTrader's default port, so a real-money profile must set its port explicitly (`brokers.py`).
+31. **IB configs default the port.** With no port given, the IB configs fall back to NautilusTrader's default port.
+    - Workaround: a profile builds no IB client without an explicit port, and `live.toml` names it (`gateway_port`) (`brokers.py`, `live/config.py`).
+    - Check: build an IB client config without a port and read its `port`.
+
+32. **A market order needs a cached price.** The risk engine denies a `MARKET` order (`MARKET_PRICE_UNAVAILABLE`) on an instrument with no quote or trade in the cache, on every account, with or without a notional cap. A node just started, or an instrument just loaded at runtime, has none.
+    - Workaround: the node's market-data actor subscribes to the quotes and trades of every instrument loaded, and a live `ScheduledExecution` child waits up to `PRICE_WAIT_SECONDS` for a first price before it is sent (`live/node.py`, `trading/scheduled_execution.py`).
+    - Check: submit a market order on an instrument without a quote in a `LiveNode`.
+
+33. **The sandbox rejects auction time in force.** The sandbox execution client rejects `AT_THE_OPEN` and `AT_THE_CLOSE` orders ("time in force AT_THE_OPEN is not currently supported"), as the simulator does (entry 13).
+    - Workaround: in `Environment.SANDBOX` an auction child is a `DAY` order sent at the auction's time (`trading/scheduled_execution.py`).
+    - Check: submit a market-on-open order through the sandbox execution client.
+
+34. **A live node hides Python failures.** An exception in a Python actor's `on_start` fails the hosted run ("Hosted run failed"), yet `LiveNode.run()` returns normally; an exception in a Python timer callback is logged and swallowed.
+    - Workaround: `run_node` reports a node whose start check never passed as failed, and the strategy keeps its first failure (entry 1) (`live/node.py`).
+    - Check: raise in an actor's `on_start` and see whether `run()` raises.
+
+35. **The Redis cache cannot select a database.** `RedisCacheConfig` takes no database index.
+    - Workaround: `live.toml` refuses a `redis_db` other than 0, so paper and real money use separate Redis instances; the fixed `trader_id` per live directory separates the keys of directories sharing one (`live/config.py`).
+    - Check: the parameters of `RedisCacheConfig`.
+
+36. **The Python cache cannot be seeded.** A node's Python `Cache` has no `add_instrument` and no account listing.
+    - Workaround: the in-process node tests serve instruments from a Python data client (`tests/fake_broker.py`), and the start check looks up the configured account by its id (`live/node.py`).
+    - Check: the methods of `nautilus_trader.common.Cache`.

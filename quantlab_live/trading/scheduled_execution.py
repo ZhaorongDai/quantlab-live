@@ -32,6 +32,13 @@ print) or at the band for a limit plan, which expires one second after the
 print. ``DAY`` children of a backtest are market orders at the print, or
 limit orders that expire at the close. A child whose print is missing (a
 halt, or no data) is not sent, so nothing ever fills at a stale price.
+NautilusTrader's sandbox (``Environment.SANDBOX``) rejects auction time in
+force too: there an auction child is a ``DAY`` order sent at the auction's
+time.
+
+A live child waits for its instrument's first quote or trade in the cache
+(at most ``PRICE_WAIT_SECONDS``): the risk engine denies a market order it
+cannot price.
 """
 
 from __future__ import annotations
@@ -62,6 +69,8 @@ ORDERS = ("market", "limit")
 CHILD_TAG = "child="
 #: The prefix of an order's tag carrying the decision's last close.
 MARK_TAG = "close="
+#: How long a live child waits for its instrument's first price, in seconds.
+PRICE_WAIT_SECONDS = 60
 #: How long a backtest auction child lives after its print.
 AUCTION_LIFE = pd.Timedelta(seconds=1)
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
@@ -290,6 +299,8 @@ class ScheduledExecution(ExecutionAlgorithm):
         super().__init__(ExecutionAlgorithmConfig(exec_algorithm_id=exec_algorithm_id))
         self._plan = plan
         self._backtest = environment == Environment.BACKTEST
+        # NautilusTrader's sandbox, like its simulator, rejects auction time in force.
+        self._sandbox = environment == Environment.SANDBOX
 
     def on_order(self, order) -> None:
         now = self._now()
@@ -323,15 +334,35 @@ class ScheduledExecution(ExecutionAlgorithm):
         self._schedule(primary, todo, child.leaves_qty)
 
     def _schedule(self, primary, todo: Action, quantity: Quantity) -> None:
-        if not self._backtest and todo.child in AUCTIONS:
-            self._submit(primary, todo.child, quantity, last_print=None)
+        if not self._backtest and not self._sandbox and todo.child in AUCTIONS:
+            self._send_live(primary, todo.child, quantity, 0)
             return
         name = f"{todo.child}:{primary.client_order_id.value}:{quantity}"
         self.clock.set_time_alert_ns(name, todo.at.value, self._on_alert, allow_past=True)
 
+    def _send_live(self, primary, kind: str, quantity: Quantity, waited: int) -> None:
+        """Submit a live child once its instrument has a price, waiting at most ``PRICE_WAIT_SECONDS``.
+
+        NautilusTrader's risk engine denies a market order on an instrument
+        without a quote or trade in the cache, which a node just started, or
+        an instrument just loaded, may not have yet.
+        """
+        instrument_id = primary.instrument_id
+        priced = self.cache.quote(instrument_id) is not None or self.cache.trade(instrument_id) is not None
+        if priced or waited >= PRICE_WAIT_SECONDS:
+            if not priced:
+                self.log.warning(f"{instrument_id} has no price after {waited} s; sending {kind} anyway")
+            self._submit(primary, kind, quantity, last_print=None)
+            return
+        name = f"{kind}:{primary.client_order_id.value}:{quantity}:{waited + 1}"
+        self.clock.set_time_alert_ns(name, self.clock.timestamp_ns() + 1_000_000_000, self._on_alert)
+
     def _on_alert(self, event) -> None:
-        kind, primary_id, quantity = event.name.split(":")
+        kind, primary_id, quantity, *waited = event.name.split(":")
         primary = self.cache.order(ClientOrderId(primary_id))
+        if not self._backtest:
+            self._send_live(primary, kind, Quantity.from_str(quantity), int(waited[0]) if waited else 0)
+            return
         last_print = None
         if self._backtest:
             last = self.cache.trade(primary.instrument_id)
@@ -351,7 +382,7 @@ class ScheduledExecution(ExecutionAlgorithm):
         reduce = kind != "fallback"  # a fallback takes the remainder of a child
         limit = self._plan.order == "limit" and kind != "fallback"
         price = self._limit_price(primary) if limit else None
-        if kind in AUCTIONS:
+        if kind in AUCTIONS and not self._sandbox:
             if self._backtest:
                 expire = pd.Timestamp(self.clock.timestamp_ns(), tz="UTC") + AUCTION_LIFE
                 child = self.spawn_limit(
