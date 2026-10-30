@@ -7,7 +7,8 @@ decision per day; files are per date. Layout of a live or replay directory:
 - ``decisions/<date>.parquet``: the decision on each bar, by symbol;
 - ``outcomes/<date>.parquet``: what each bar's orders did, by symbol;
 - ``snapshots/<date>.parquet``: positions by symbol and cash, at a bar's close;
-- ``equity.parquet``: the strategy's equity, one row per bar.
+- ``equity.parquet``: the strategy's equity, one row per bar;
+- ``security_map.parquet``: the security map's history (live only).
 
 Each file is written to a temporary file, fsynced and renamed, so a crash
 leaves either no file or a complete one. NautilusTrader owns orders, fills
@@ -17,17 +18,20 @@ and positions; these records hold what it does not.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from nautilus_trader.model import InstrumentId
 
 DECISIONS = "decisions"
 OUTCOMES = "outcomes"
 SNAPSHOTS = "snapshots"
 EQUITY = "equity.parquet"
+SECURITY_MAP = "security_map.parquet"
 
 _KEY = [("bar", pa.timestamp("ns")), ("symbol", pa.int64())]
 DECISION_SCHEMA = pa.schema(
@@ -56,6 +60,14 @@ EQUITY_SCHEMA = pa.schema(
         ("cash", pa.float64()),
         ("holdings", pa.float64()),
         ("equity", pa.float64()),
+    ]
+)
+SECURITY_MAP_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.int64()),
+        ("instrument_id", pa.string()),
+        ("first", pa.date32()),
+        ("last", pa.date32()),
     ]
 )
 
@@ -235,6 +247,125 @@ def read_equity(directory) -> pd.DataFrame:
     See ``append_equity``.
     """
     return pq.read_table(Path(directory) / EQUITY).to_pandas().set_index("bar")
+
+
+class SecurityMap:
+    """Symbols to instrument ids and back, with every id a symbol has had.
+
+    A map is built on a day from that day's ids (``updated``) and keeps its
+    history: each ``(symbol, instrument_id)`` pair with the first and last
+    day it held. ``to_id`` gives a symbol's id on the map's day, and
+    ``to_symbol`` maps any id the history holds back to its symbol, so the
+    id of a renamed ticker still maps back. An id two symbols have held
+    (a reused ticker) maps back to the one that held it last.
+
+    Parameters
+    ----------
+    history : pandas.DataFrame, optional
+        Columns ``symbol``, ``instrument_id`` (text), ``first`` and ``last``
+        (days); empty by default.
+    date : datetime-like, optional
+        The map's day, the last day its history holds; ``None`` when empty.
+
+    Examples
+    --------
+    >>> monday, tuesday = pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")
+    >>> fb, meta = InstrumentId.from_str("FB.NASDAQ"), InstrumentId.from_str("META.NASDAQ")
+    >>> security_map = SecurityMap().updated(monday, {1: fb}).updated(tuesday, {1: meta, 2: None})
+    >>> security_map.to_id(1), security_map.to_id(2), security_map.to_symbol(fb)
+    (InstrumentId('META.NASDAQ'), None, 1)
+    >>> security_map.to_symbol(InstrumentId.from_str("AAPL.NASDAQ")) is None
+    True
+    """
+
+    def __init__(self, history: pd.DataFrame | None = None, date=None):
+        if history is None:
+            history = pd.DataFrame({"symbol": [], "instrument_id": [], "first": [], "last": []})
+        self.history = history.astype(
+            {"symbol": "int64", "instrument_id": object, "first": "datetime64[ns]", "last": "datetime64[ns]"}
+        ).reset_index(drop=True)
+        self.date = None if date is None else pd.Timestamp(date).normalize()
+        ordered = self.history.sort_values(["last", "first"], kind="stable")
+        self._back = dict(zip(ordered["instrument_id"], ordered["symbol"]))
+        today = ordered[ordered["last"] == self.date]
+        self._today = {int(s): InstrumentId.from_str(i) for s, i in zip(today["symbol"], today["instrument_id"])}
+
+    def to_id(self, symbol: int) -> InstrumentId | None:
+        """Return ``symbol``'s instrument id on the map's day; ``None`` when unmapped."""
+        return self._today.get(int(symbol))
+
+    def to_symbol(self, instrument_id: InstrumentId) -> int | None:
+        """Return the symbol that last held ``instrument_id``; ``None`` for an id never mapped."""
+        symbol = self._back.get(instrument_id.value)
+        return None if symbol is None else int(symbol)
+
+    def updated(self, date, ids: Mapping[int, InstrumentId | None]) -> SecurityMap:
+        """Return this map built on ``date`` from that day's ``ids`` (``None`` where unmapped).
+
+        Building again on the map's own day adds to that day's ids.
+
+        Raises
+        ------
+        ValueError
+            If ``date`` is before the map's day.
+
+        Examples
+        --------
+        See ``SecurityMap``.
+        """
+        date = pd.Timestamp(date).normalize()
+        if self.date is not None and date < self.date:
+            raise ValueError(f"the security map is built up to {self.date.date()}; cannot build it on {date.date()}")
+        history = self.history.copy()
+        rows = {(s, i): k for k, (s, i) in enumerate(zip(history["symbol"], history["instrument_id"]))}
+        new = []
+        for symbol, instrument_id in ids.items():
+            if instrument_id is None:
+                continue
+            key = (int(symbol), instrument_id.value)
+            if key in rows:
+                history.loc[rows[key], "last"] = date
+            else:
+                new.append({"symbol": key[0], "instrument_id": key[1], "first": date, "last": date})
+        if new:
+            history = pd.concat([history, pd.DataFrame(new)], ignore_index=True)
+        return SecurityMap(history, date)
+
+
+def write_security_map(directory, security_map: SecurityMap) -> Path:
+    """Write ``security_map`` with its history, so the next day's map keeps it.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> directory = tempfile.mkdtemp()
+    >>> fb = InstrumentId.from_str("FB.NASDAQ")
+    >>> _ = write_security_map(directory, SecurityMap().updated(pd.Timestamp("2024-01-02"), {1: fb}))
+    >>> again = read_security_map(directory)
+    >>> again.to_id(1), again.date.date().isoformat()
+    (InstrumentId('FB.NASDAQ'), '2024-01-02')
+    """
+    if security_map.date is None:
+        raise ValueError("an empty security map has no day to write")
+    metadata = {b"date": security_map.date.date().isoformat().encode()}
+    return _write(Path(directory) / SECURITY_MAP, security_map.history, SECURITY_MAP_SCHEMA, metadata)
+
+
+def read_security_map(directory) -> SecurityMap | None:
+    """Return the security map written in ``directory``; ``None`` before the first.
+
+    Examples
+    --------
+    See ``write_security_map``.
+    """
+    path = Path(directory) / SECURITY_MAP
+    if not path.exists():
+        return None
+    table = pq.read_table(path)
+    history = table.to_pandas()
+    for column in ("first", "last"):
+        history[column] = pd.to_datetime(history[column])
+    return SecurityMap(history, table.schema.metadata[b"date"].decode())
 
 
 def _path(directory, kind: str, bar: pd.Timestamp) -> Path:

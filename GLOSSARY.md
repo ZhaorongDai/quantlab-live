@@ -27,6 +27,12 @@ _Avoid_: signal file, order list
 A symbol's ticker and primary exchange as of a date, as quantlab records them; what a broker's instrument id is built from.
 _Avoid_: contract (the broker's), name (quantlab's display name)
 
+**Security map**:
+Symbols to a broker's instrument ids and back, built each day from the listings by the broker profile, keeping every id a symbol has had so a renamed ticker's id still maps back.
+
+**Broker profile**:
+A broker as configuration: its NautilusTrader data and execution clients, its security-map builder and its fee model; paper and real money are separate profiles.
+
 **Live prediction store**:
 quantlab's append-only store of a run's predictions past its end, one bar per live day, written by quantlab's prediction job.
 
