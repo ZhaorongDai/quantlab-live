@@ -159,10 +159,37 @@ class Run:
 
             first_prints = run.opens().iloc[0]
         """
+        return self._raw("open", start, end)
+
+    def closes(self, start=None, end=None) -> pd.DataFrame:
+        """Return the raw close of every dataset bar from ``start`` to ``end``.
+
+        A replay feeds these as the closing prints. NaN where the market had
+        no close; unlike a decision bar's marks, nothing is carried forward.
+
+        Parameters
+        ----------
+        start, end : datetime-like, optional
+            Default to the run's window.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Indexed by bar, one column per symbol.
+
+        Examples
+        --------
+        ::
+
+            first_closes = run.closes().iloc[0]
+        """
+        return self._raw("close", start, end)
+
+    def _raw(self, name: str, start, end) -> pd.DataFrame:
         start = self.window[0] if start is None else pd.Timestamp(start)
         end = self.window[1] if end is None else pd.Timestamp(end)
         prices = self._dataset.panel(start, end).load()
-        frame = prices["open"].transpose("timestamp", "symbol").to_pandas()
+        frame = prices[name].transpose("timestamp", "symbol").to_pandas()
         return frame.rename_axis(index=None, columns=None)
 
     def targets(self, loop: str) -> DecisionInputs | xr.DataArray:

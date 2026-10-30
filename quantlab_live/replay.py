@@ -2,10 +2,24 @@
 
 The replay runs the live strategy and execution algorithm against one
 synthetic ``SIM`` venue with one MARGIN account. Each symbol is the
-instrument ``<symbol>.SIM`` (the identity security map), the opening prints
-are fed as ``TradeTick`` data and the run's decision bars are added to the
-engine as ``DecisionBar`` data, so the strategy receives them exactly as it
-does live.
+instrument ``<symbol>.SIM`` (the identity security map), the prints the
+execution plan trades at are fed as ``TradeTick`` data and the run's
+decision bars are added to the engine as ``DecisionBar`` data, so the
+strategy receives them exactly as it does live.
+
+A daily quantlab run has an open and a close per bar, so the prints are:
+
+- the opening print at the session's open, at the raw open;
+- the closing print at the session's close (early closes included), at the
+  raw close;
+- a print at any other time of the session (an ``HH:MM`` plan, the opening
+  auction's fallback), on the straight line from the open to the close by
+  the time elapsed in the session;
+- after an auction print, the same price again one second later: the
+  simulator expires an order only on its instrument's next trade, and an
+  unfilled auction child must expire there, before anything else trades.
+
+Only the prints the plan can trade at are fed.
 """
 
 from __future__ import annotations
@@ -17,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from nautilus_trader.backtest import BacktestEngine, BacktestEngineConfig
-from nautilus_trader.common import LoggerConfig, LogLevel
+from nautilus_trader.common import Environment, LoggerConfig, LogLevel
 from nautilus_trader.execution import FixedFeeModel
 from nautilus_trader.model import (
     AccountType,
@@ -43,14 +57,17 @@ from nautilus_trader.model import (
 from quantlab_live import records
 from quantlab_live.quantlab_gate import PRICE_PRECISION, open_run
 from quantlab_live.trading.decision_bar import NEW_YORK, DecisionBar
-from quantlab_live.trading.scheduled_execution import ScheduledExecution
+from quantlab_live.trading.scheduled_execution import (
+    AUCTION_LIFE,
+    ExecutionPlan,
+    ScheduledExecution,
+    Session,
+)
 from quantlab_live.trading.strategy import BAR_TAG, QuantlabStrategy
 from quantlab_live.trading.targets import RebalanceTableTargets
 
 SIM = Venue("SIM")
 USD = Currency.from_str("USD")
-#: The regular session's opening print, New York time.
-OPENING_PRINT = pd.Timedelta(hours=9, minutes=30)
 #: A print's size: replay takes the whole order at the print.
 PRINT_SIZE = Quantity(10**9, 0)
 #: The NautilusTrader reports a replay exports, by file name.
@@ -77,7 +94,14 @@ class IdentityMap:
         return int(instrument_id.symbol.value)
 
 
-def replay(run_dir, out_dir=None, *, loop: str = "open", plan: str = "open_auction") -> Path:
+def replay(
+    run_dir,
+    out_dir=None,
+    *,
+    loop: str = "open",
+    plan: str | ExecutionPlan = "open_auction",
+    fill_model=None,
+) -> Path:
     """Replay the quantlab run at ``run_dir`` and write the replay directory.
 
     Parameters
@@ -88,8 +112,12 @@ def replay(run_dir, out_dir=None, *, loop: str = "open", plan: str = "open_aucti
         The replay directory; defaults to ``replay-<loop>`` inside ``run_dir``.
     loop : {"open"}
         ``"open"`` executes the run's finished rebalance table.
-    plan : {"open_auction"}
-        When the orders trade.
+    plan : str or ExecutionPlan
+        When and how the orders trade: ``"open_auction"``,
+        ``"close_auction"``, a New York time ``"HH:MM"`` (market orders), or
+        a full ``ExecutionPlan``.
+    fill_model : nautilus_trader.execution.FillModel, optional
+        The simulated venue's fill model.
 
     Returns
     -------
@@ -113,6 +141,7 @@ def replay(run_dir, out_dir=None, *, loop: str = "open", plan: str = "open_aucti
     """
     if loop != "open":
         raise ValueError(f"loop must be 'open', not {loop!r}")
+    plan = plan if isinstance(plan, ExecutionPlan) else ExecutionPlan(plan)
     run = open_run(run_dir)
     out_dir = Path(run.run_dir / f"replay-{loop}" if out_dir is None else out_dir)
     security_map = IdentityMap()
@@ -126,17 +155,18 @@ def replay(run_dir, out_dir=None, *, loop: str = "open", plan: str = "open_aucti
         base_currency=USD,
         default_leverage=Decimal(1),
         fee_model=FixedFeeModel(Money(0, USD)),
+        fill_model=fill_model,
     )
-    opens = run.opens()
+    opens, closes = run.opens(), run.closes()
     for symbol in opens.columns:
         engine.add_instrument(_equity(security_map.to_id(symbol)))
-    engine.add_data(_opening_prints(opens, security_map))
+    engine.add_data(_prints(opens, closes, plan, security_map))
     engine.add_data(
         [CustomData(DataType(DecisionBar.__name__), bar) for bar in run.bars()],
         client_id=ClientId("QUANTLAB"),
     )
     algorithm_id = ExecAlgorithmId("SCHEDULED")
-    engine.add_exec_algorithm(ScheduledExecution(algorithm_id, plan=plan))
+    engine.add_exec_algorithm(ScheduledExecution(algorithm_id, plan, Environment.BACKTEST))
     strategy = QuantlabStrategy(
         RebalanceTableTargets(run.targets("open")),
         security_map,
@@ -188,10 +218,9 @@ def _outcomes(orders, security_map: IdentityMap) -> dict[pd.Timestamp, pd.DataFr
     for primary in primaries:
         spawned = children.get(primary.client_order_id.value, [])
         sign = 1.0 if primary.side == OrderSide.BUY else -1.0
-        # Spawning moves quantity from the primary to its children.
-        quantity = sum(float(c.quantity) for c in spawned) if spawned else float(primary.quantity)
+        quantity = float(primary.events()[0].quantity)  # as initialized, before spawning
         filled = sum(float(c.filled_qty) for c in spawned)
-        cost = sum(float(c.filled_qty) * float(c.avg_px) for c in spawned if c.filled_qty)
+        cost = sum(float(c.filled_qty) * float(c.avg_px) for c in spawned if float(c.filled_qty))
         if not spawned:
             status = "not_sent"
         elif filled == quantity:
@@ -232,26 +261,51 @@ def _equity(instrument_id: InstrumentId) -> Equity:
     )
 
 
-def _opening_prints(opens: pd.DataFrame, security_map: IdentityMap) -> list[TradeTick]:
-    """One ``TradeTick`` per symbol and bar with an open, at the bar's opening print."""
+def _prints(
+    opens: pd.DataFrame, closes: pd.DataFrame, plan: ExecutionPlan, security_map: IdentityMap
+) -> list[TradeTick]:
+    """The prints ``plan`` can trade at, per bar and symbol with prices for them."""
     ticks = []
-    for bar, row in opens.iterrows():
-        ts = (pd.Timestamp(bar).tz_localize(NEW_YORK) + OPENING_PRINT).value
-        for symbol, price in row.items():
-            if not np.isfinite(price):
-                continue
-            ticks.append(
-                TradeTick(
-                    security_map.to_id(symbol),
-                    Price(float(price), PRICE_PRECISION),
-                    PRINT_SIZE,
-                    AggressorSide.NO_AGGRESSOR,
-                    TradeId(f"open-{symbol}-{pd.Timestamp(bar).date()}"),
-                    ts,
-                    ts,
+    for bar in opens.index:
+        session = Session.on(bar)
+        for name, at, priced_at in _print_times(plan, session):
+            if priced_at == session.open:
+                prices = opens.loc[bar]
+            elif priced_at == session.close:
+                prices = closes.loc[bar]
+            else:
+                fraction = (priced_at - session.open) / (session.close - session.open)
+                prices = opens.loc[bar] + (closes.loc[bar] - opens.loc[bar]) * fraction
+            for symbol, price in prices.round(PRICE_PRECISION).items():
+                if not np.isfinite(price):
+                    continue
+                ticks.append(
+                    TradeTick(
+                        security_map.to_id(symbol),
+                        Price(float(price), PRICE_PRECISION),
+                        PRINT_SIZE,
+                        AggressorSide.NO_AGGRESSOR,
+                        TradeId(f"{name}-{symbol}-{pd.Timestamp(bar).date()}"),
+                        at.value,
+                        at.value,
+                    )
                 )
-            )
-    return ticks
+    return sorted(ticks, key=lambda tick: tick.ts_event)
+
+
+def _print_times(plan: ExecutionPlan, session: Session) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    """A session's prints that ``plan`` can trade at: name, time and the time priced at."""
+    opening = [("open", session.open, session.open), ("open-end", session.open + AUCTION_LIFE, session.open)]
+    closing = [("close", session.close, session.close), ("close-end", session.close + AUCTION_LIFE, session.close)]
+    if plan.at == "open_auction":
+        fallback = session.open + pd.Timedelta(minutes=plan.fallback_minutes)
+        return opening + [("fallback", fallback, fallback)]
+    if plan.at == "close_auction":
+        return closing
+    at = session.at(plan.at)
+    timed = [("timed", at, at)] if session.open <= at < session.close else []
+    # A timed limit child rests until it expires at the close.
+    return timed + (closing if plan.order == "limit" else [])
 
 
 def _export_reports(engine: BacktestEngine, reports_dir: Path) -> None:

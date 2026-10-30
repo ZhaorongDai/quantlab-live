@@ -4,7 +4,8 @@ The strategy receives each ``DecisionBar`` in ``on_data`` only; it never
 knows whether it runs live or in a replay. On a bar it values its holdings at
 the bar's marks, asks its target source for the bar's weights, sizes them in
 whole shares and submits the difference to its execution algorithm, which
-decides when the orders reach the venue.
+decides when the orders reach the venue. Each order is tagged with its bar
+and with the bar's close, which a limit plan's band is around.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from nautilus_trader.model import (
 from nautilus_trader.trading import Strategy, StrategyConfig
 
 from quantlab_live.trading.decision_bar import DecisionBar
+from quantlab_live.trading.scheduled_execution import MARK_TAG
 
 
 class TargetSource(Protocol):
@@ -137,7 +139,7 @@ class QuantlabStrategy(Strategy):
                 Quantity(abs(quantity), 0),
                 time_in_force=TimeInForce.DAY,
                 exec_algorithm_id=self._exec_algorithm_id,
-                tags=[bar_tag(bar)],
+                tags=[bar_tag(bar), MARK_TAG + repr(float(close[symbol]))],
             )
             self.submit_order(order)
 
