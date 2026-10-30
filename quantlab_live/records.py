@@ -613,6 +613,18 @@ def decision_bars(directory) -> list[pd.Timestamp]:
     return _bars(directory, DECISIONS)
 
 
+def outcome_bars(directory) -> list[pd.Timestamp]:
+    """Return every bar of ``directory`` with outcomes, in order.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> outcome_bars(tempfile.mkdtemp())
+    []
+    """
+    return _bars(directory, OUTCOMES)
+
+
 def latest_snapshot(directory, before) -> Snapshot | None:
     """Return the latest snapshot at a bar before the day ``before``; ``None`` without one.
 

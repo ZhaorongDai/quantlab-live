@@ -7,7 +7,7 @@ import math
 import pandas as pd
 import pytest
 
-from quantlab_live.trading.outcomes import ORDER_COLUMNS, FILL_COLUMNS, order_outcomes
+from quantlab_live.trading.outcomes import ORDER_COLUMNS, FILL_COLUMNS, order_outcomes, redecided
 
 SYMBOL = 10001
 
@@ -128,3 +128,22 @@ def test_a_position_its_fills_do_not_explain_is_unverified():
     done = CASES["filled"]
     assert order_outcomes(decision(), *done, positions=pd.Series({SYMBOL: 100.0})).loc[SYMBOL, "status"] == "filled"
     assert order_outcomes(decision(), *done, positions=pd.Series({SYMBOL: 90.0})).loc[SYMBOL, "status"] == "unverified"
+
+
+def test_an_unverified_outcome_is_decided_again_once_its_orders_are_known():
+    # At the stop the child was still working; after the next start's reconciliation it has filled.
+    at_stop = order_outcomes(decision(), orders(PRIMARY, child("day", "ACCEPTED", 100.0)), fills(), None)
+    assert at_stop.loc[SYMBOL, "status"] == "unverified"
+
+    again = redecided(at_stop, decision(), orders(PRIMARY, child("day", "FILLED")), fills(("C", 100.0, 10.5)))
+
+    assert again.loc[SYMBOL, ["filled_quantity", "avg_px", "status"]].tolist() == [100.0, 10.5, "filled"]
+
+
+def test_an_order_still_working_stays_unverified_and_a_settled_outcome_is_kept():
+    working = orders(PRIMARY, child("day", "ACCEPTED", 100.0))
+    at_stop = order_outcomes(decision(), working, fills(), None)
+    assert redecided(at_stop, decision(), working, fills()).loc[SYMBOL, "status"] == "unverified"
+
+    settled = order_outcomes(decision(), orders(PRIMARY, child("day", "FILLED")), fills(("C", 100.0, 10.5)), None)
+    assert redecided(settled, decision(), working, fills()).equals(settled)

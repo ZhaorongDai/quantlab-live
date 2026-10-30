@@ -52,7 +52,9 @@ from quantlab_live.brokers import BrokerProfile
 from quantlab_live.live.config import load_config
 from quantlab_live.live.guards import start_refusals
 from quantlab_live.quantlab_gate import QuantlabNotReady, open_run
-from quantlab_live.trading.outcomes import FOREIGN, UNMAPPED, order_bar, order_frames, order_outcomes
+from quantlab_live.trading.outcomes import (
+    FOREIGN, UNMAPPED, UNVERIFIED, order_bar, order_frames, order_outcomes, redecided,
+)
 from quantlab_live.trading.scheduled_execution import Session
 from quantlab_live.trading.strategy import STRATEGY_ID, DirectoryDecisions, account_cash
 
@@ -207,12 +209,20 @@ def _run(
     handle = node.handle()
     accounts = [AccountId(c.account_id) for c in exec_clients if c.account_id is not None]
 
+    redecided_alerts: list[str] = []
+
     def check(cache) -> str | None:
         reported = [str(a) for a in accounts if cache.account(a) is not None]
         refusals = refusals_of(reported)
         if refusals:
             return "the start is refused: " + "; ".join(refusals)
-        write(started=True)
+        if not dry_run:
+            # Reconciled: what an earlier node could not verify at its stop is known now.
+            try:
+                redecided_alerts.extend(redecide_unverified(live_dir, bar, cache, security_map))
+            except Exception as error:  # noqa: BLE001 - never refuses the start
+                redecided_alerts.append(f"deciding the unverified outcomes again failed: {error!r}")
+        write(started=True, alerts=tuple(redecided_alerts))
         if settle:  # start-up reconciliation is done: nothing is left to wait for
             handle.stop()
         return None
@@ -255,7 +265,7 @@ def _run(
         node.dispose()
         _write_planned(live_dir / DRY_RUN_DIR, date, strategy.planned)
         return write(finished=True)
-    alerts = list(state_alerts(node.cache, security_map))
+    alerts = [*redecided_alerts, *state_alerts(node.cache, security_map)]
     outcomes = _write_outcomes(live_dir, bar, node.cache, security_map)
     _write_snapshot(live_dir, date, node.cache, security_map, accounts, exec_clients)
     node.dispose()
@@ -311,6 +321,44 @@ def claimed_instruments(security_map, snapshot: records.Snapshot | None, decisio
 
 
 _NOTHING_HELD = records.Snapshot(pd.Timestamp(0), pd.DataFrame({"quantity": []}), 0.0)
+
+
+def redecide_unverified(live_dir, bar: pd.Timestamp, cache, security_map) -> list[str]:
+    """Decide again the unverified outcomes of the bars before ``bar``, from the reconciled cache.
+
+    Run after a node's start-up reconciliation. A bar whose orders the
+    cache no longer holds (Redis was lost) keeps its unverified outcomes.
+    Returns an alert per bar looked at.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> redecide_unverified(tempfile.mkdtemp(), pd.Timestamp("2024-01-08"), cache=None, security_map=None)
+    []
+    """
+    alerts = []
+    for earlier in records.outcome_bars(live_dir):
+        outcomes = records.read_outcomes(live_dir, earlier)
+        unverified = int((outcomes["status"] == UNVERIFIED).sum())
+        if earlier >= bar or not unverified:
+            continue
+        frame, fills = order_frames(cache.orders(strategy_id=STRATEGY_ID), security_map.to_symbol)
+        mine = frame[frame["tags"].map(order_bar) == earlier]
+        if mine.empty:
+            alerts.append(
+                f"{unverified} unverified outcomes of the decision on {earlier.date()} stay unverified: "
+                "the cache holds none of its orders"
+            )
+            continue
+        decision = records.read_decision(live_dir, earlier)
+        again = redecided(outcomes, decision, mine, fills[fills["client_order_id"].isin(mine.index)])
+        records.write_outcomes(live_dir, earlier, again)
+        changed = again["status"][outcomes["status"] == UNVERIFIED]
+        alerts.append(
+            f"the unverified outcomes of the decision on {earlier.date()} were decided again: "
+            + ", ".join(f"{symbol} {status}" for symbol, status in changed.items())
+        )
+    return alerts
 
 
 def state_alerts(cache, security_map) -> list[str]:

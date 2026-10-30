@@ -222,3 +222,25 @@ def test_a_restart_that_lost_its_cache_claims_what_the_days_decision_trades(live
     claims = claimed_instruments(records.read_security_map(live_dir), records.latest_snapshot(live_dir, DATE), decision)
 
     assert {i.value for i in claims} == {"AAA=STK.SMART", "BBB=STK.SMART", "CCC=STK.SMART"}
+
+
+def test_an_earlier_unverified_outcome_whose_orders_the_cache_lost_stays_unverified_and_alerts(live_dir):
+    earlier = BARS[-2]
+    decision = pd.DataFrame(
+        {"weight": [0.5], "close": [11.0], "position_quantity": [0.0], "target_quantity": [100.0],
+         "order_quantity": [100.0], "skip": [""]},
+        index=pd.Index([A], name="symbol"),
+    )
+    records.write_decision(live_dir, earlier, decision, 10_000.0)
+    unverified = pd.DataFrame(
+        {"order_quantity": [100.0], "filled_quantity": [0.0], "avg_px": [float("nan")], "fees": [0.0],
+         "status": ["unverified"]},
+        index=pd.Index([A], name="symbol"),
+    )
+    records.write_outcomes(live_dir, earlier, unverified)
+
+    report = run_node(live_dir, DATE, settle=True, broker=fake_profile(PRICES)[0], redis=False)
+
+    assert report.started and report.error is None
+    assert records.read_outcomes(live_dir, earlier)["status"].tolist() == ["unverified"]
+    assert any("stay unverified: the cache holds none of its orders" in alert for alert in report.alerts)

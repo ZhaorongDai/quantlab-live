@@ -133,6 +133,49 @@ def order_outcomes(
     return frame.rename_axis("symbol")
 
 
+def redecided(outcomes: pd.DataFrame, decision: pd.DataFrame, orders: pd.DataFrame, fills: pd.DataFrame) -> pd.DataFrame:
+    """Return ``outcomes`` with each ``unverified`` row decided again from the bar's orders as they are now.
+
+    A later node, once its start-up reconciliation has brought the orders
+    up to date, decides again what was not known at the bar's stop. The
+    positions have moved on since, so they are not compared; an order still
+    working stays unverified, and the other rows are kept as they are.
+
+    Parameters
+    ----------
+    outcomes : pandas.DataFrame
+        The bar's outcomes (``order_outcomes``).
+    decision, orders, fills : pandas.DataFrame
+        As ``order_outcomes`` takes them: the bar's decision, all its orders
+        and their fills.
+
+    Examples
+    --------
+    >>> decision = pd.DataFrame(
+    ...     {"position_quantity": [0.0], "order_quantity": [100.0], "skip": [""]}, index=pd.Index([10001], name="symbol"),
+    ... )
+    >>> before = pd.DataFrame(
+    ...     {"order_quantity": [100.0], "filled_quantity": [0.0], "avg_px": [float("nan")], "fees": [0.0],
+    ...      "status": ["unverified"]}, index=pd.Index([10001], name="symbol"),
+    ... )
+    >>> orders = pd.DataFrame(
+    ...     {"symbol": [10001, 10001], "primary": ["P", "P"], "child": [None, "day"],
+    ...      "status": ["INITIALIZED", "FILLED"], "leaves": [0.0, 0.0], "cancel_requested": [False, False]},
+    ...     index=["P", "C"],
+    ... )
+    >>> fills = pd.DataFrame({"client_order_id": ["C"], "symbol": [10001], "quantity": [100.0], "price": [10.5]})
+    >>> redecided(before, decision, orders, fills)[["filled_quantity", "status"]].to_dict("records")
+    [{'filled_quantity': 100.0, 'status': 'filled'}]
+    """
+    unverified = outcomes.index[outcomes["status"] == UNVERIFIED]
+    if unverified.empty:
+        return outcomes
+    again = order_outcomes(decision.loc[decision.index.intersection(unverified)], orders, fills, None)
+    result = outcomes.copy()
+    result.loc[again.index, again.columns] = again
+    return result
+
+
 def _status(row: pd.Series, orders: pd.DataFrame, filled: float, position: float | None) -> str:
     skip = row.get("skip") or ""
     if skip:
