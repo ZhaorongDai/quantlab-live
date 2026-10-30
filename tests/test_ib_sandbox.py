@@ -8,8 +8,9 @@ Gateway and Redis up::
 
 and, to start ``ibkr_paper`` in a dry run on the paper account (its positions
 held overnight, upstream NautilusTrader issue 5428), also
-``QUANTLAB_LIVE_IB_ACCOUNT=<the paper account id>``. Without
-``QUANTLAB_LIVE_IB_GATEWAY`` every test here is skipped.
+``QUANTLAB_LIVE_IB_ACCOUNT=<the paper account id>``; to check the snapshot's
+cash on that account, also ``QUANTLAB_LIVE_IB_CASH=<its cash in TWS>``.
+Without ``QUANTLAB_LIVE_IB_GATEWAY`` every test here is skipped.
 
 The quantlab run is the tiny fixture run, listed as three real stocks; the
 sandbox fills its orders on IB's quotes. It checks:
@@ -22,7 +23,11 @@ sandbox fills its orders on IB's quotes. It checks:
 - a node killed mid-day restarts from Redis, finds its working orders and
   submits nothing again;
 - a start on an account of the other mode is refused before any order;
-- an ``ibkr_paper`` start with positions held overnight reconciles (dry run).
+- an ``ibkr_paper`` start with positions held overnight reconciles (dry run);
+- the snapshot's cash on the paper account is IB's cash: ``account_cash``
+  subtracts the open positions' cost from the account's balance, which holds
+  for the sandbox's MARGIN account, but would count the positions twice if
+  IB's balance is already net of them. Open until this test has run.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ from tests.quantlab_run_fixture import build_constructor_run
 GATEWAY = os.environ.get("QUANTLAB_LIVE_IB_GATEWAY")
 REDIS = os.environ.get("QUANTLAB_LIVE_REDIS")
 ACCOUNT = os.environ.get("QUANTLAB_LIVE_IB_ACCOUNT")
+CASH = os.environ.get("QUANTLAB_LIVE_IB_CASH")
 pytestmark = pytest.mark.skipif(not GATEWAY, reason="QUANTLAB_LIVE_IB_GATEWAY names no IB Gateway")
 
 A, B, C = 10001, 10002, 10003
@@ -201,3 +207,16 @@ def test_an_ibkr_paper_start_with_positions_held_overnight_reconciles(tmp_path, 
     report = run_node(live_dir, _today(), dry_run=True, redis=REDIS is not None)
 
     assert report.started and report.finished and report.error is None, report
+
+
+@pytest.mark.skipif(ACCOUNT is None or CASH is None, reason="QUANTLAB_LIVE_IB_ACCOUNT and QUANTLAB_LIVE_IB_CASH are not both set")
+def test_the_snapshot_cash_of_the_paper_account_is_ibs_cash(tmp_path, run_dir):
+    # A settle-only node trades nothing and writes the end-of-day snapshot from the broker.
+    live_dir = _live_dir(tmp_path, run_dir, "cash", broker="ibkr_paper", account_id=ACCOUNT)
+
+    report = run_node(live_dir, _today(), settle=True, redis=REDIS is not None)
+
+    assert report.started and report.error is None, report
+    snapshot = records.read_snapshot(live_dir, _today())
+    # Each position counted once: within a dollar per position of TWS's cash, not off by the portfolio's cost.
+    assert snapshot.cash == pytest.approx(float(CASH), abs=1.0 + len(snapshot.positions) + len(snapshot.foreign))

@@ -140,3 +140,9 @@ Each entry gives the limitation, the workaround and where it lives, and how to c
 38. **A request's callback runs once.** `request_instrument` with several instrument ids calls its callback on the first response only, so instruments that arrive in later responses go unnoticed by it.
     - Workaround: while orders wait for their instruments, `QuantlabStrategy` also looks at the cache every second, and leaves unsent only the orders whose instrument has not arrived `INSTRUMENT_WAIT_SECONDS` after the request (`trading/strategy.py`).
     - Check: request two instruments from a data client that answers each in its own response (`tests/fake_broker.py`), and count the callbacks.
+
+## Corporate actions in replay
+
+39. **A position's quantity cannot change from Python.** NautilusTrader has no Python call that changes an open position's quantity, so a split cannot be applied to a position held through it.
+    - Workaround: replay trades in split-adjusted engine units, one unit being the raw shares of one share at the replay's first bar. The prints and marks it is fed are split adjusted (`SplitTable`), the fee model converts units back to raw shares at the order's `ts_init` (entry 19), the `DividendModule` pays dividends per unit, and the records are converted to raw units when written (`replay.py`, `brokers.py`). An upstream patch for corporate actions is optional later work.
+    - Check: look for a split or position-adjustment event on positions, or a cache method that sets a position's quantity, and replay a split without the conversion.
