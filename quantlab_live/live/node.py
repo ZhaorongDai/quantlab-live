@@ -56,7 +56,7 @@ from quantlab_live.trading.outcomes import (
     FOREIGN, UNMAPPED, UNVERIFIED, order_bar, order_frames, order_outcomes, redecided,
 )
 from quantlab_live.trading.scheduled_execution import Session
-from quantlab_live.trading.strategy import STRATEGY_ID, DirectoryDecisions, account_cash
+from quantlab_live.trading.strategy import STRATEGY_ID, DirectoryDecisions, RecordedPnl, account_cash
 
 #: Where a dry run writes its decisions and planned orders, in the live directory.
 DRY_RUN_DIR = "dry-run"
@@ -236,7 +236,8 @@ def _run(
         run, decisions, loop="closed", plan=config.plan, security_map=security_map,
         environment=environment, dry_run=dry_run, bars=bars if bars is not None else [],
         check=check, on_refused=refuse, external_order_claims=claims, instrument_client=data_client,
-        session=session,
+        session=session, initial_capital=config.initial_capital,
+        pnl=None if config.initial_capital is None else RecordedPnl(live_dir, config.initial_capital),
     )
     if settle:
         node.add_actor(components.decision_source)  # the start check; it publishes no bar

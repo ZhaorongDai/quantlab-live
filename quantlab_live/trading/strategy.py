@@ -60,13 +60,80 @@ class DecisionRecords(Protocol):
     """Where the strategy keeps its decisions, one per bar.
 
     ``write`` returns only once the decision is durable; the strategy sends
-    no order of a bar before it has. ``read`` returns ``None`` for a bar not
-    yet decided. Quantities and prices are in the strategy's units.
+    no order of a bar before it has. It is given the capital sized on and
+    the strategy's equity at the bar's closes. ``read`` returns ``None`` for
+    a bar not yet decided. Quantities and prices are in the strategy's
+    units.
     """
 
     def read(self, bar: pd.Timestamp) -> pd.DataFrame | None: ...
 
-    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float) -> None: ...
+    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float, equity: float) -> None: ...
+
+
+class StrategyPnl(Protocol):
+    """The strategy's cumulative profit and loss at a bar's closes, since its ``initial_capital``.
+
+    ``holdings`` is the value of the strategy's positions and
+    ``account_equity`` the account's equity, both at the bar's closes.
+    """
+
+    def pnl(self, bar: pd.Timestamp, account_equity: float, holdings: float) -> float: ...
+
+
+class RecordedPnl:
+    """A live directory's strategy P&L: its strategy equity as ``live.value`` records it.
+
+    The strategy's cash is the latest equity row's at or before the bar (its
+    P&L until then, valued at quantlab's close), and its holdings are valued
+    at the bar's closes. Before any row the P&L is zero (the takeover).
+
+    Parameters
+    ----------
+    directory : path-like
+        The live directory.
+    initial_capital : float
+        The strategy's initial capital.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> directory = tempfile.mkdtemp()
+    >>> RecordedPnl(directory, 10_000.0).pnl(pd.Timestamp("2024-01-02"), 50_000.0, 9_000.0)
+    0.0
+    >>> _ = records.append_equity(directory, pd.Timestamp("2024-01-02"), cash=1_500.0, holdings=9_000.0)
+    >>> RecordedPnl(directory, 10_000.0).pnl(pd.Timestamp("2024-01-02"), 50_000.0, 9_200.0)
+    700.0
+    """
+
+    def __init__(self, directory, initial_capital: float):
+        self._directory, self._initial = directory, float(initial_capital)
+
+    def pnl(self, bar: pd.Timestamp, account_equity: float, holdings: float) -> float:
+        try:
+            equity = records.read_equity(self._directory)
+        except FileNotFoundError:
+            return 0.0
+        rows = equity[equity.index <= pd.Timestamp(bar)]
+        if rows.empty:
+            return 0.0
+        return float(rows["cash"].iloc[-1]) + float(holdings) - self._initial
+
+
+class AccountPnl:
+    """The P&L of a strategy alone in its account (a replay): the account's equity less its starting cash.
+
+    Examples
+    --------
+    >>> AccountPnl(20_000.0).pnl(pd.Timestamp("2024-01-02"), 21_000.0, 9_000.0)
+    1000.0
+    """
+
+    def __init__(self, starting_cash: float):
+        self._start = float(starting_cash)
+
+    def pnl(self, bar: pd.Timestamp, account_equity: float, holdings: float) -> float:
+        return float(account_equity) - self._start
 
 
 class DirectoryDecisions:
@@ -95,8 +162,11 @@ class DirectoryDecisions:
         except FileNotFoundError:
             return None
 
-    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float) -> None:
-        """Write the decision on ``bar`` and the capital it sized on durably (tmp, fsync and rename)."""
+    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float, equity: float) -> None:
+        """Write the decision on ``bar`` and the capital it sized on durably (tmp, fsync and rename).
+
+        The strategy equity is recorded by ``live.value``, not here.
+        """
         records.write_decision(self._directory, bar, decision, capital)
 
 
@@ -162,6 +232,12 @@ class QuantlabStrategy(Strategy):
     dry_run : bool, default False
         Decide and write the decision, but submit nothing: the orders that
         would be submitted are kept in ``planned``.
+    initial_capital : float, optional
+        The strategy capital's start: orders size on it plus the strategy's
+        P&L (``pnl``), capped by the account's equity (``strategy_capital``).
+        Unset, they size on the account's equity.
+    pnl : StrategyPnl, optional
+        The strategy's P&L; required with ``initial_capital``.
 
     Examples
     --------
@@ -184,8 +260,14 @@ class QuantlabStrategy(Strategy):
         external_order_claims=(),
         instrument_client: ClientId | None = None,
         dry_run: bool = False,
+        initial_capital: float | None = None,
+        pnl: StrategyPnl | None = None,
     ):
         super().__init__(_config(external_order_claims))
+        if initial_capital is not None and pnl is None:
+            raise ValueError("an initial_capital needs the strategy's P&L (pnl)")
+        self._initial_capital = initial_capital
+        self._pnl = pnl
         self._targets = targets
         self._map = security_map
         self._exec_algorithm_id = exec_algorithm_id
@@ -224,11 +306,18 @@ class QuantlabStrategy(Strategy):
         close = record.marks()["close"]
         held = self._holdings()
         value = held["quantity"] * close.reindex(held.index)
-        capital = strategy_capital(self._cash(close) + float(value.sum()))
+        holdings = float(value.sum())
+        account_equity = self._cash(close) + holdings
+        if self._initial_capital is None:
+            pnl, equity = 0.0, account_equity
+        else:
+            pnl = self._pnl.pnl(bar, account_equity, holdings)
+            equity = self._initial_capital + pnl
+        capital = strategy_capital(account_equity, self._initial_capital, pnl)
         current = value / capital if capital else value * 0.0
         decision = size_orders(self._targets.weights(record, current), close, held, capital)
         decision["skip"] = self._skips(decision)
-        self._decisions.write(bar, decision, capital)
+        self._decisions.write(bar, decision, capital, equity)
         ordered = decision[(decision["order_quantity"] != 0) & (decision["skip"] == "")]
         self._submit(bar, ordered["order_quantity"], decision["close"])
 

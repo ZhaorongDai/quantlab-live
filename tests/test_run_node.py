@@ -244,3 +244,27 @@ def test_an_earlier_unverified_outcome_whose_orders_the_cache_lost_stays_unverif
     assert report.started and report.error is None
     assert records.read_outcomes(live_dir, earlier)["status"].tolist() == ["unverified"]
     assert any("stay unverified: the cache holds none of its orders" in alert for alert in report.alerts)
+
+
+@pytest.mark.parametrize(
+    "initial_capital, equity_cash, capital",
+    [
+        (5_000.0, None, 5_000.0),  # the takeover: no P&L yet
+        (5_000.0, 6_000.0, 6_000.0),  # 1,000 of P&L valued at the last close, nothing held
+        (20_000.0, None, 10_000.0),  # capped by the account's equity
+    ],
+)
+def test_orders_size_on_the_initial_capital_plus_the_strategys_pnl_capped_by_the_account(
+    live_dir, initial_capital, equity_cash, capital
+):
+    (live_dir / "live.toml").write_text((live_dir / "live.toml").read_text() + f"initial_capital = {initial_capital}\n")
+    if equity_cash is not None:
+        records.append_equity(live_dir, BAR, cash=equity_cash, holdings=0.0)
+
+    report = run_node(live_dir, DATE, dry_run=True, broker=fake_profile(PRICES)[0], redis=False)
+
+    assert report.error is None
+    assert records.decision_capital(live_dir / DRY_RUN_DIR, BAR) == capital
+    decision = records.read_decision(live_dir / DRY_RUN_DIR, BAR)
+    spent = (decision["target_quantity"] * decision["close"]).sum()
+    assert capital - 50.0 < spent <= capital  # whole shares of the top two, half each

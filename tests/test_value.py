@@ -46,3 +46,27 @@ def test_the_latest_snapshot_is_valued_at_quantlabs_close_once(live_dir):
 
 def test_without_a_snapshot_there_is_nothing_to_value(live_dir):
     assert value(live_dir, BARS[3]) is None
+
+
+def test_with_an_initial_capital_the_equity_is_the_strategys_own(live_dir, run_dir):
+    (live_dir / "live.toml").write_text(f'run = "{run_dir}"\ninitial_capital = 1_000.0\n')
+    # The first decision, on BARS[1], held 10 of 10001 at its close of 11; it bought 40 more at 11.5 with 1.00 fees.
+    decision = pd.DataFrame(
+        {"weight": [0.5], "close": [11.0], "position_quantity": [10.0], "target_quantity": [50.0],
+         "order_quantity": [40.0], "skip": [""]},
+        index=pd.Index([10001], name="symbol"),
+    )
+    records.write_decision(live_dir, BARS[1], decision, capital=1_000.0)
+    outcomes = pd.DataFrame(
+        {"order_quantity": [40.0], "filled_quantity": [40.0], "avg_px": [11.5], "fees": [1.0], "status": ["filled"]},
+        index=pd.Index([10001], name="symbol"),
+    )
+    records.write_outcomes(live_dir, BARS[1], outcomes)
+    # The account holds far more cash than the strategy: it is not the strategy's.
+    held = pd.DataFrame({"quantity": [50.0]}, index=pd.Index([10001], name="symbol"))
+    records.write_snapshot(live_dir, records.Snapshot(BARS[2], held, cash=90_000.0))
+
+    assert value(live_dir, BARS[3]) == BARS[2]
+
+    cash = 1_000.0 - 10 * 11.0 - 40 * 11.5 - 1.0
+    assert records.read_equity(live_dir).loc[BARS[2]].tolist() == [cash, 50 * 12.0, cash + 50 * 12.0]

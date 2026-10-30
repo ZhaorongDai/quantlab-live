@@ -285,6 +285,8 @@ def _against_replay(
     start = segment.start
     if start in equity.index:
         initial = float(equity.at[start, "equity"])
+    elif segment.initial_capital is not None:  # the takeover day: the strategy's equity is its initial capital
+        initial = float(segment.initial_capital)
     else:  # the takeover day: no close valued before it, so the capital it sized on
         initial = records.decision_capital(live_dir, start)
     if initial is None:

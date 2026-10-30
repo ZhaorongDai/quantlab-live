@@ -79,6 +79,7 @@ from quantlab_live import brokers, records, trading
 from quantlab_live.quantlab_gate import PRICE_PRECISION, open_run
 from quantlab_live.trading.decision_bar import NEW_YORK, DecisionBar, decision_ns
 from quantlab_live.trading.outcomes import order_bar, order_frames, order_outcomes
+from quantlab_live.trading.strategy import AccountPnl
 from quantlab_live.trading.scheduled_execution import (
     AUCTION_LIFE,
     ExecutionPlan,
@@ -271,6 +272,7 @@ def replay(
     fill_model: FillModel | None = None,
     restarts=(),
     initial_cash: float | None = None,
+    initial_capital: float | None = None,
     store=None,
 ) -> Path:
     """Replay the quantlab run at ``run_dir`` and write the replay directory.
@@ -308,6 +310,10 @@ def replay(
     initial_cash : float, optional
         The account's cash at the first bar; the run's initial cash by
         default.
+    initial_capital : float, optional
+        The strategy capital's start: orders size on it plus the strategy's
+        P&L (the account's equity less ``initial_cash``), capped by the
+        account's equity, as live. Unset, they size on the account's equity.
     store : path-like, optional
         The run's live prediction store, for a window past the run's end
         (``Run.bars``).
@@ -353,12 +359,13 @@ def replay(
     read = {} if store is None else {"store": store}
     bars = [_in_units(bar, splits) for bar in run.bars(start, end, **read)]
 
+    starting_cash = run.init_cash if initial_cash is None else float(initial_cash)
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggerConfig(stdout_level=LogLevel.WARNING)))
     engine.add_venue(
         SIM,
         OmsType.NETTING,
         AccountType.MARGIN,
-        [Money(run.init_cash if initial_cash is None else float(initial_cash), USD)],
+        [Money(starting_cash, USD)],
         base_currency=USD,
         default_leverage=Decimal(1),
         fill_model=fill_model,
@@ -383,7 +390,8 @@ def replay(
     decisions = _ReplayDecisions(out_dir, splits)
     components = trading.parts(
         run, decisions, loop=loop, plan=plan, security_map=security_map,
-        environment=Environment.BACKTEST, end=end,
+        environment=Environment.BACKTEST, end=end, initial_capital=initial_capital,
+        pnl=None if initial_capital is None else AccountPnl(starting_cash),
     )
     components.add_to(engine)
     strategy, algorithm = components.strategy, components.exec_algorithm
@@ -431,8 +439,8 @@ class _ReplayDecisions:
         self.decided[bar] = decision
         return decision
 
-    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float) -> None:
-        _record_bar(self._out_dir, bar, decision, capital, self._splits.ratio(bar))
+    def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float, equity: float) -> None:
+        _record_bar(self._out_dir, bar, decision, capital, equity, self._splits.ratio(bar))
         self.decided[bar] = decision
 
 
@@ -442,20 +450,21 @@ def _utc_ns(t) -> int:
 
 
 def _record_bar(
-    out_dir: Path, bar: pd.Timestamp, decision: pd.DataFrame, equity: float, ratio: pd.Series
+    out_dir: Path, bar: pd.Timestamp, decision: pd.DataFrame, capital: float, equity: float, ratio: pd.Series
 ) -> None:
-    """Record a bar's decision, and its close's snapshot and equity, from the decision.
+    """Record a bar's decision, and its close's snapshot and strategy equity, from the decision.
 
-    The decision holds the positions at the bar's close and the equity it
-    sized on, valued at the bar's closes; it is in engine units, and is
-    recorded in raw units (``ratio`` raw shares per unit).
+    The decision holds the positions at the bar's close; ``capital`` is
+    what it sized on and ``equity`` the strategy's equity, both at the
+    bar's closes. It is in engine units, and is recorded in raw units
+    (``ratio`` raw shares per unit). The snapshot's cash is the strategy's.
     """
     ratio = ratio.reindex(decision.index)
     decision = decision.copy()
     decision["close"] = decision["close"] / ratio
     for column in ("position_quantity", "target_quantity", "order_quantity"):
         decision[column] = decision[column] * ratio
-    records.write_decision(out_dir, bar, decision, equity)
+    records.write_decision(out_dir, bar, decision, capital)
     position = decision["position_quantity"]
     holdings = float((position * decision["close"]).sum())
     cash = equity - holdings

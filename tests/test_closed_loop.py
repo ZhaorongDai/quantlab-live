@@ -112,3 +112,16 @@ def test_an_open_loop_window_trades_only_its_bars(tmp_path):
     # Bar 2's orders would fill at bar 3's open, after the window.
     assert {fill[0] for fill in _fills(out_dir)} == {_open_print(BARS[1])}
     assert records.read_outcomes(out_dir, BARS[2])["status"].eq("not_sent").all()
+
+
+def test_a_strategy_with_spare_cash_in_its_account_trades_as_if_alone_with_its_initial_capital(tmp_path):
+    run_dir = _closed_run(tmp_path / "run")
+    alone = replay(run_dir, tmp_path / "alone", initial_cash=10_000.0)
+    spare = replay(run_dir, tmp_path / "spare", initial_cash=25_000.0, initial_capital=10_000.0)
+
+    # It sizes on its initial capital plus its P&L, so the spare cash buys nothing ...
+    assert _fills(spare) == _fills(alone)
+    for bar in records.decision_bars(alone):
+        assert records.decision_capital(spare, bar) == pytest.approx(records.decision_capital(alone, bar))
+    # ... and its recorded equity, and so its metrics, are its own: 10,000 plus its P&L.
+    pd.testing.assert_frame_equal(records.read_equity(spare), records.read_equity(alone))
