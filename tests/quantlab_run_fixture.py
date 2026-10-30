@@ -363,6 +363,7 @@ def build_constructor_run(
     slippage: float = 0.0,
     variables: Mapping[str, Mapping[int, Sequence[float]]] | None = None,
     benchmark: tuple[Mapping[int, Sequence[float]], Mapping[int, Sequence[float]]] | None = None,
+    benchmark_ticker: str | None = None,
     listings: Mapping[int, Sequence[tuple[str | None, str, str | None]]] | None = None,
 ) -> tuple[Path, list[str]]:
     """Write a CRSP-shaped store and a closed-loop-ready quantlab run; return it.
@@ -373,7 +374,9 @@ def build_constructor_run(
     window's bars. ``rule`` may be a function of the price dataset, for a
     rule built on it (a factor risk model's stores). ``benchmark`` is the
     raw ``(open, close)`` of one PERMNO over ``bars``, written to its own
-    store as the run's benchmark (``build_quantlab_run``'s). Returns the run
+    store as the run's benchmark (``build_quantlab_run``'s); with
+    ``benchmark_ticker`` that store is read as a Sharadar store whose ticker
+    sidecar names it so. Returns the run
     directory and the ISO timestamps of the bars ``DecisionInputs.weights``
     held after a failure. ``listings`` makes the store a Sharadar store with
     that ticker sidecar (``build_quantlab_run``'s).
@@ -410,9 +413,7 @@ def build_constructor_run(
             fees=fees,
             slippage=slippage,
             init_cash=init_cash,
-            benchmark_dataset=None
-            if benchmark is None
-            else _crsp_dataset(root / "benchmark", bars, *benchmark),
+            benchmark_dataset=_benchmark_dataset(root, bars, benchmark, benchmark_ticker),
         )
     )
     # Keyed as quantlab's backtester keys the reads of run() (its components' paths).
@@ -433,6 +434,17 @@ def build_constructor_run(
     # quantlab's BacktestRun.predictions reads a run's prediction panel.
     PredictionPanel(panel, labels).write(run_dir / PREDICTION_PANEL)
     return run_dir, failed
+
+
+def _benchmark_dataset(root: Path, bars, benchmark, ticker: str | None):
+    """The benchmark's dataset: a CRSP store, or a Sharadar one naming ``ticker``."""
+    if benchmark is None:
+        return None
+    dataset = _crsp_dataset(root / "benchmark", bars, *benchmark)
+    if ticker is None:
+        return dataset
+    (permno,) = benchmark[1]
+    return _sharadar_dataset(dataset, {permno: [(None, ticker, "NYSEARCA")]})
 
 
 def _add_reads(run_dir: Path, records: Mapping[str, list[dict]]) -> None:

@@ -23,6 +23,7 @@ from quantlab_live.live.supervisor import (
     PostClose,
     Prepare,
     Start,
+    AfterOpen,
     Value,
     Wait,
     what_now,
@@ -47,7 +48,8 @@ def state(day: str = DAY, **fields) -> DayState:
 
 
 def ready(day: str = DAY, **fields) -> DayState:
-    """Prepared and valued."""
+    """Prepared and valued, its after-open mail sent unless ``briefed=False``."""
+    fields.setdefault("briefed", True)
     return state(day, bar=BAR, valued=True, **fields)
 
 
@@ -101,6 +103,16 @@ CASES = {
     "never started, past the latest start": (DAY, "open_auction", "09:01", ready(), NotTraded),
     "timed plan, start still in time": (DAY, "10:30", "10:05", ready(), Start),
     "node running": (DAY, "open_auction", "11:00", ready(attempts=(attempt(DAY, "07:15", running=True),)), Wait),
+    # The after-open mail, 15 minutes after the open, in place of a wait.
+    "node running, after the open": (
+        DAY, "open_auction", "09:45",
+        ready(briefed=False, attempts=(attempt(DAY, "07:15", running=True),)), AfterOpen),
+    "node running, before the after-open mail": (
+        DAY, "open_auction", "09:44",
+        ready(briefed=False, attempts=(attempt(DAY, "07:15", running=True),)), Wait),
+    "a crash restarts before the after-open mail": (
+        DAY, "open_auction", "11:00",
+        ready(briefed=False, attempts=(attempt(DAY, "07:15", started=True),)), Start),
     # Crashes: restarted at once until the close, whatever the latest start.
     "crash before the close": (
         DAY, "open_auction", "11:00", ready(attempts=(attempt(DAY, "07:15", started=True),)), Start),

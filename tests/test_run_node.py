@@ -71,6 +71,8 @@ def test_a_node_decides_after_start_up_trades_and_writes_outcomes_and_the_snapsh
     snapshot = records.read_snapshot(live_dir, DATE)
     filled = outcomes["filled_quantity"]
     assert snapshot.positions["quantity"].to_dict() == filled[filled != 0].to_dict()
+    assert snapshot.foreign == {} and snapshot.cash == 10_000.0
+    assert records.decision_capital(live_dir, BAR) == 10_000.0  # sized on the account's equity
     assert (live_dir / "steps" / DATE.date().isoformat() / "manual-trade.json").exists()
     assert records.read_security_map(live_dir).to_id(A).value == "AAA=STK.SMART"
 

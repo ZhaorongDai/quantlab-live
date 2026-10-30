@@ -270,6 +270,8 @@ def replay(
     broker: str = "ibkr",
     fill_model: FillModel | None = None,
     restarts=(),
+    initial_cash: float | None = None,
+    store=None,
 ) -> Path:
     """Replay the quantlab run at ``run_dir`` and write the replay directory.
 
@@ -303,6 +305,12 @@ def replay(
         sends) is lost, the cache (orders, positions, the account) is kept,
         as Redis keeps it live, and the latest decision bar is published
         again, so the strategy resumes its decision.
+    initial_cash : float, optional
+        The account's cash at the first bar; the run's initial cash by
+        default.
+    store : path-like, optional
+        The run's live prediction store, for a window past the run's end
+        (``Run.bars``).
 
     A replay into a directory that already holds some bars' decisions
     resumes them rather than deciding them again, as a restarted node does.
@@ -342,14 +350,15 @@ def replay(
     security_map = IdentityMap()
     split_factor, dividend = run.corporate_actions(start, end)
     splits = SplitTable(split_factor)
-    bars = [_in_units(bar, splits) for bar in run.bars(start, end)]
+    read = {} if store is None else {"store": store}
+    bars = [_in_units(bar, splits) for bar in run.bars(start, end, **read)]
 
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggerConfig(stdout_level=LogLevel.WARNING)))
     engine.add_venue(
         SIM,
         OmsType.NETTING,
         AccountType.MARGIN,
-        [Money(run.init_cash, USD)],
+        [Money(run.init_cash if initial_cash is None else float(initial_cash), USD)],
         base_currency=USD,
         default_leverage=Decimal(1),
         fill_model=fill_model,
@@ -446,7 +455,7 @@ def _record_bar(
     decision["close"] = decision["close"] / ratio
     for column in ("position_quantity", "target_quantity", "order_quantity"):
         decision[column] = decision[column] * ratio
-    records.write_decision(out_dir, bar, decision)
+    records.write_decision(out_dir, bar, decision, equity)
     position = decision["position_quantity"]
     holdings = float((position * decision["close"]).sum())
     cash = equity - holdings

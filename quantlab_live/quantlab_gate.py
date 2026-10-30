@@ -338,6 +338,42 @@ class Run:
 
         return frame("splitFactor", 1.0), frame("divCash", 0.0)
 
+    def benchmark(self, start, end) -> tuple[str, pd.Series] | None:
+        """Return the run's benchmark: its ticker and its valuation prices from ``start`` to ``end``.
+
+        The benchmark is the one the run was made with, rebuilt from the
+        run's recorded recipe (a dataset the run held in memory is read from
+        the copy beneath the run directory), so it never drifts with a
+        later configuration. Its ticker is its ticker lookup's label as of
+        ``end``, or the symbol's id when the dataset names no tickers. The
+        prices are the market's valuation column (adjusted closes), so
+        their ratio is the benchmark's return.
+
+        Returns
+        -------
+        tuple of (str, pandas.Series) or None
+            The ticker and the prices by bar; ``None`` for a run without a
+            benchmark.
+
+        Examples
+        --------
+        ::
+
+            ticker, prices = run.benchmark("2026-10-01", "2026-10-28")
+            print(f"{ticker}: {prices.iloc[-1] / prices.iloc[0] - 1:+.2%}")
+        """
+        dataset = self._backtest_run.rebuild("benchmark_dataset")
+        if dataset is None:
+            return None
+        start, end = pd.Timestamp(start), pd.Timestamp(end)
+        column = self._market.valuation_price_column
+        prices = dataset.panel(start, end, variables=[column]).load()[column]
+        frame = prices.transpose("timestamp", "symbol").to_pandas()
+        (symbol,) = frame.columns
+        lookup = dataset.ticker_lookup()
+        ticker = str(symbol) if lookup is None else str(lookup.label([symbol], end.date())[0])
+        return ticker, frame[symbol].rename(None).rename_axis(None)
+
     def targets(self, loop: str, *, end=None) -> DecisionInputs | xr.DataArray:
         """Return the raw inputs of the run's targets.
 

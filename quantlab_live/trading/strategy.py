@@ -96,8 +96,8 @@ class DirectoryDecisions:
             return None
 
     def write(self, bar: pd.Timestamp, decision: pd.DataFrame, capital: float) -> None:
-        """Write the decision on ``bar`` durably (tmp, fsync and rename)."""
-        records.write_decision(self._directory, bar, decision)
+        """Write the decision on ``bar`` and the capital it sized on durably (tmp, fsync and rename)."""
+        records.write_decision(self._directory, bar, decision, capital)
 
 
 #: The strategy's id: one strategy per trader.

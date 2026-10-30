@@ -10,6 +10,9 @@ decision per day; files are per date. Layout of a live or replay directory:
 - ``equity.parquet``: the strategy's equity, one row per bar;
 - ``security_map.parquet``: the security map's history (live only).
 
+The account history (``account.toml``, one per account) lists the account's
+strategy segments in order; ``record_segment`` starts one.
+
 Each file is written to a temporary file, fsynced and renamed, so a crash
 leaves either no file or a complete one. NautilusTrader owns orders, fills
 and positions; these records hold what it does not.
@@ -19,8 +22,9 @@ from __future__ import annotations
 
 import json
 import os
+import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -33,6 +37,7 @@ OUTCOMES = "outcomes"
 SNAPSHOTS = "snapshots"
 EQUITY = "equity.parquet"
 SECURITY_MAP = "security_map.parquet"
+ACCOUNT_HISTORY = "account.toml"
 
 _KEY = [("bar", pa.timestamp("ns")), ("symbol", pa.int64())]
 DECISION_SCHEMA = pa.schema(
@@ -87,14 +92,19 @@ class Snapshot:
         ``quantity`` by ``symbol``, signed raw shares; held symbols only.
     cash : float
         The account's cash.
+    foreign : dict of str to float
+        The account's foreign positions: signed raw shares by instrument id,
+        positions the strategy does not own; never traded, listed in the
+        close briefing.
     """
 
     bar: pd.Timestamp
     positions: pd.DataFrame
     cash: float
+    foreign: dict[str, float] = field(default_factory=dict)
 
 
-def write_decision(directory, bar: pd.Timestamp, decision: pd.DataFrame) -> Path:
+def write_decision(directory, bar: pd.Timestamp, decision: pd.DataFrame, capital: float | None = None) -> Path:
     """Write the decision on ``bar``; a bar is decided at most once.
 
     Parameters
@@ -108,6 +118,9 @@ def write_decision(directory, bar: pd.Timestamp, decision: pd.DataFrame) -> Path
         ``position_quantity``, ``target_quantity``, ``order_quantity`` and
         ``skip``: why an ordered symbol is not traded (``"unmapped"``,
         ``"foreign"``), empty when it is.
+    capital : float, optional
+        The strategy capital the decision sized on (``decision_capital``),
+        which the decision recheck divides the holdings by.
 
     Raises
     ------
@@ -126,6 +139,8 @@ def write_decision(directory, bar: pd.Timestamp, decision: pd.DataFrame) -> Path
     >>> _ = write_decision(directory, pd.Timestamp("2024-01-02"), decision)
     >>> read_decision(directory, pd.Timestamp("2024-01-02"))["order_quantity"].to_dict()
     {10001: 50.0}
+    >>> decision_capital(directory, pd.Timestamp("2024-01-02")) is None
+    True
     >>> write_decision(directory, pd.Timestamp("2024-01-02"), decision)
     Traceback (most recent call last):
     ...
@@ -134,7 +149,8 @@ def write_decision(directory, bar: pd.Timestamp, decision: pd.DataFrame) -> Path
     path = _path(directory, DECISIONS, bar)
     if path.exists():
         raise FileExistsError(f"bar {pd.Timestamp(bar).date()} already has a decision at {path}")
-    return _write(path, _keyed(bar, decision), DECISION_SCHEMA)
+    metadata = None if capital is None else {b"capital": repr(float(capital)).encode()}
+    return _write(path, _keyed(bar, decision), DECISION_SCHEMA, metadata)
 
 
 def read_decision(directory, bar: pd.Timestamp) -> pd.DataFrame:
@@ -150,6 +166,31 @@ def read_decision(directory, bar: pd.Timestamp) -> pd.DataFrame:
     See ``write_decision``.
     """
     return _read(_path(directory, DECISIONS, bar))
+
+
+def decision_capital(directory, bar: pd.Timestamp) -> float | None:
+    """Return the strategy capital the decision on ``bar`` sized on; ``None`` if not recorded.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the bar has no decision.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> directory = tempfile.mkdtemp()
+    >>> decision = pd.DataFrame(
+    ...     {"weight": [1.0], "close": [10.0], "position_quantity": [0.0],
+    ...      "target_quantity": [100.0], "order_quantity": [100.0], "skip": [""]},
+    ...     index=pd.Index([10001], name="symbol"),
+    ... )
+    >>> _ = write_decision(directory, pd.Timestamp("2024-01-02"), decision, capital=1_000.0)
+    >>> decision_capital(directory, pd.Timestamp("2024-01-02"))
+    1000.0
+    """
+    metadata = pq.read_schema(_path(directory, DECISIONS, bar)).metadata or {}
+    return float(metadata[b"capital"]) if b"capital" in metadata else None
 
 
 def write_outcomes(directory, bar: pd.Timestamp, outcomes: pd.DataFrame) -> Path:
@@ -198,11 +239,12 @@ def write_snapshot(directory, snapshot: Snapshot) -> Path:
     >>> positions = pd.DataFrame({"quantity": [50.0]}, index=pd.Index([10001], name="symbol"))
     >>> _ = write_snapshot(directory, Snapshot(pd.Timestamp("2024-01-02"), positions, cash=475.0))
     >>> again = read_snapshot(directory, pd.Timestamp("2024-01-02"))
-    >>> again.cash, again.positions["quantity"].to_dict()
-    (475.0, {10001: 50.0})
+    >>> again.cash, again.positions["quantity"].to_dict(), again.foreign
+    (475.0, {10001: 50.0}, {})
     """
     table = _keyed(snapshot.bar, snapshot.positions)
-    metadata = {b"cash": repr(float(snapshot.cash)).encode()}
+    foreign = {str(k): float(v) for k, v in snapshot.foreign.items()}
+    metadata = {b"cash": repr(float(snapshot.cash)).encode(), b"foreign": json.dumps(foreign).encode()}
     return _write(_path(directory, SNAPSHOTS, snapshot.bar), table, SNAPSHOT_SCHEMA, metadata)
 
 
@@ -214,8 +256,9 @@ def read_snapshot(directory, bar: pd.Timestamp) -> Snapshot:
     See ``write_snapshot``.
     """
     path = _path(directory, SNAPSHOTS, bar)
-    cash = float(pq.read_schema(path).metadata[b"cash"])
-    return Snapshot(pd.Timestamp(bar).normalize(), _read(path), cash)
+    metadata = pq.read_schema(path).metadata
+    foreign = json.loads(metadata.get(b"foreign", b"{}"))
+    return Snapshot(pd.Timestamp(bar).normalize(), _read(path), float(metadata[b"cash"]), foreign)
 
 
 def append_equity(directory, bar: pd.Timestamp, cash: float, holdings: float) -> Path:
@@ -556,6 +599,18 @@ def has_decision(directory, bar: pd.Timestamp) -> bool:
     return _path(directory, DECISIONS, bar).exists()
 
 
+def decision_bars(directory) -> list[pd.Timestamp]:
+    """Return every decided bar of ``directory``, in order.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> decision_bars(tempfile.mkdtemp())
+    []
+    """
+    return _bars(directory, DECISIONS)
+
+
 def latest_snapshot(directory, before) -> Snapshot | None:
     """Return the latest snapshot at a bar before the day ``before``; ``None`` without one.
 
@@ -575,6 +630,116 @@ def latest_snapshot(directory, before) -> Snapshot | None:
     days = sorted(p.stem for p in folder.glob("*.parquet")) if folder.exists() else []
     days = [d for d in days if d < limit]
     return read_snapshot(directory, pd.Timestamp(days[-1])) if days else None
+
+
+#: The outcomes of an order that never reached the broker.
+_NEVER_SENT = ("not_sent", "unmapped", "foreign")
+
+
+@dataclass(frozen=True)
+class Segment:
+    """One strategy segment of an account: a strategy trading it from a decision bar on.
+
+    Attributes
+    ----------
+    start : pandas.Timestamp
+        The first decision bar whose orders reached the broker.
+    live_dir : str
+        The live directory that traded it, absolute.
+    run : str
+        The quantlab run traded, absolute.
+    broker : str
+        The broker profile.
+    initial_capital : float, optional
+        The strategy capital's start; unset when it sized on the account's equity.
+    """
+
+    start: pd.Timestamp
+    live_dir: str
+    run: str
+    broker: str
+    initial_capital: float | None = None
+
+    def same_strategy(self, other: Segment) -> bool:
+        """Whether ``other`` is this segment's strategy: the same live directory, run and broker."""
+        return (self.live_dir, self.run, self.broker) == (other.live_dir, other.run, other.broker)
+
+
+def read_account_history(path) -> list[Segment]:
+    """Return the account's strategy segments in order; empty before the first.
+
+    Examples
+    --------
+    See ``record_segment``.
+    """
+    path = Path(path)
+    if not path.exists():
+        return []
+    with open(path, "rb") as file:
+        raw = tomllib.load(file)
+    return [
+        Segment(pd.Timestamp(item["start"]), item["live_dir"], item["run"], item["broker"], item.get("initial_capital"))
+        for item in raw.get("segment", [])
+    ]
+
+
+def record_segment(path, segment: Segment, outcomes: pd.DataFrame) -> bool:
+    """Start ``segment`` in the account history at ``path``, if its orders start one.
+
+    A segment starts only with real orders: ``outcomes`` (of the decision on
+    ``segment.start``) must hold an order that reached the broker, so a
+    dry run or a day whose orders were all skipped starts none. The same
+    strategy trading on continues its segment; another strategy (another
+    live directory, run or broker) starts the next one.
+
+    Returns
+    -------
+    bool
+        Whether a segment was started.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> path = Path(tempfile.mkdtemp()) / "account.toml"
+    >>> segment = Segment(pd.Timestamp("2024-01-02"), "/live/a", "/runs/a", "ibkr_paper", 10_000.0)
+    >>> outcomes = pd.DataFrame({"status": ["filled"]}, index=pd.Index([10001], name="symbol"))
+    >>> record_segment(path, segment, outcomes), record_segment(path, segment, outcomes)
+    (True, False)
+    >>> [s.start.date().isoformat() for s in read_account_history(path)]
+    ['2024-01-02']
+    """
+    if not (~outcomes["status"].isin(_NEVER_SENT)).any():
+        return False
+    history = read_account_history(path)
+    if history and history[-1].same_strategy(segment):
+        return False
+    history.append(segment)
+    lines = [
+        "# The account's strategy segments, in order. quantlab-live starts one when a",
+        "# strategy's orders first reach the broker.",
+    ]
+    for item in history:
+        lines += ["", "[[segment]]", f"start = {item.start.date().isoformat()}"]
+        lines += [f"{name} = {json.dumps(getattr(item, name))}" for name in ("live_dir", "run", "broker")]
+        if item.initial_capital is not None:
+            lines.append(f"initial_capital = {float(item.initial_capital)!r}")
+    _write_text(Path(path), "\n".join(lines) + "\n")
+    return True
+
+
+def current_segment(path, live_dir, run) -> Segment | None:
+    """Return the account's current segment when it is the strategy of ``live_dir`` and ``run``.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> current_segment(Path(tempfile.mkdtemp()) / "account.toml", "/live/a", "/runs/a") is None
+    True
+    """
+    history = read_account_history(path)
+    if history and (history[-1].live_dir, history[-1].run) == (str(live_dir), str(run)):
+        return history[-1]
+    return None
 
 
 def _write_text(path: Path, text: str) -> Path:

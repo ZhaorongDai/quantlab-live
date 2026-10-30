@@ -130,7 +130,8 @@ def _run(live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker
     bars = None
     if not settle:
         try:
-            bars = list(run.bars(bar, bar, store=config.store_dir if config.store_dir.exists() else None))
+            # A bar past the run's end is predicted into the live prediction store.
+            bars = list(run.bars(bar, bar, store=config.store_dir if bar > run.window[1] else None))
         except QuantlabNotReady as error:
             return write(error=f"quantlab is not ready: {error}")
 
@@ -272,14 +273,21 @@ def _positions(cache, security_map) -> pd.DataFrame:
 
 
 def _write_snapshot(live_dir: Path, date: pd.Timestamp, cache, security_map, accounts, exec_clients) -> None:
-    """Write the end-of-day snapshot: the strategy's positions by symbol and the account's cash."""
+    """Write the end-of-day snapshot: the strategy's positions by symbol, the account's cash, and
+    the positions the strategy does not own (foreign) by instrument id."""
     account = next((cache.account(a) for a in accounts if cache.account(a) is not None), None)
     if account is None:
         venues = [getattr(c.config, "venue", None) for c in exec_clients]
         account = next((cache.account_for_venue(v) for v in venues if v is not None), None)
     cash = float("nan") if account is None else account_cash(cache, account)
     positions = _positions(cache, security_map)
-    records.write_snapshot(live_dir, records.Snapshot(date, positions[positions["quantity"] != 0], cash))
+    foreign = {}
+    for position in cache.positions_open():
+        if position.strategy_id != STRATEGY_ID:
+            key = position.instrument_id.value
+            foreign[key] = foreign.get(key, 0.0) + float(position.signed_qty)
+    snapshot = records.Snapshot(date, positions[positions["quantity"] != 0], cash, foreign)
+    records.write_snapshot(live_dir, snapshot)
 
 
 def _write_planned(directory: Path, date: pd.Timestamp, planned: list[dict]) -> Path:
