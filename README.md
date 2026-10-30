@@ -38,4 +38,7 @@ Public functions carry NumPy docstrings with an Examples section; the examples r
 - `quantlab_live/records.py`: the repository's own records (decisions, outcomes, snapshots, equity), typed parquet in raw units.
 - `quantlab_live/replay.py`: `replay(run_dir, loop="closed" | "open", start=None, end=None)` trades a quantlab run, or a window of it, on NautilusTrader's `BacktestEngine` and writes the records and NautilusTrader's reports. `restarts=[...]` restarts the node mid-replay as after a crash, and a replay into a decided directory resumes its decisions.
 
+- `quantlab_live/live/`: the unattended live day. `day(live_dir)` is the hourly cron entry: under a per-day lock it prepares quantlab's data and prediction, values the latest snapshot, starts the node in a fresh process (retried until the latest start, restarted after a crash until the close), settles missing outcomes and mails every failure. `status`, `run-node` and `brief` take the same lock. The configuration is one `live.toml` (`run`, `initial_capital`, `at`, `order`, `broker`, `real_money`; everything else defaults, and `status` prints it all).
+- `python -m quantlab_live day | status | run-node | brief | replay`: the command line.
+
 The domain vocabulary is in [GLOSSARY.md](GLOSSARY.md).

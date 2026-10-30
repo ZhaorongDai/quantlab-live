@@ -136,20 +136,50 @@ class Run:
             if have[-1] < calendar[-1]:
                 raise QuantlabNotReady(f"the prediction panel has no bar at {calendar[-1].date()} yet")
             predictions = predictions.sel(timestamp=slice(calendar[0], calendar[-1])).load()
-        valuation_column = self._market.valuation_price_column
-        prices = self._dataset.panel(calendar[0], calendar[-1]).load()
-        raw_close = prices["close"].transpose("timestamp", "symbol").to_pandas()
-        delisted = self._dataset.delisting_bars(prices, valuation_column).to_pandas()
-        last_value = _last_valuation(
-            raw_close, prices[valuation_column].transpose("timestamp", "symbol").to_pandas()
-        )
-        close = raw_close.mask(delisted, last_value).ffill()
+        close, delisted = self._marks(calendar[0], calendar[-1])
         for t in calendar:
             frame = pd.DataFrame({"close": close.loc[t], "delisted": delisted.loc[t].astype(bool)})
             if predictions is not None and t in predictions.indexes["timestamp"]:
                 row = predictions.sel(timestamp=t, drop=True).to_dataframe()
                 frame = frame.join(row.add_prefix(PREDICTION))
             yield DecisionBar.from_frame(t, frame.rename_axis("symbol"))
+
+    def marks(self, bar, *, lookback=pd.Timedelta(days=366)) -> pd.Series:
+        """Return quantlab's close marks at ``bar``, by symbol: what holdings are valued at.
+
+        The marks of the bar's ``DecisionBar``: the raw close, carried
+        forward over the ``lookback`` before the bar, and on a delisting bar
+        the security's last valuation. Unlike ``bars``, it needs no
+        prediction of the bar.
+
+        Raises
+        ------
+        QuantlabNotReady
+            If the dataset has no bar at ``bar``.
+
+        Examples
+        --------
+        ::
+
+            holdings = (snapshot.positions["quantity"] * run.marks(snapshot.bar)).sum()
+        """
+        bar = pd.Timestamp(bar).normalize()
+        calendar = pd.DatetimeIndex(self._dataset.calendar(bar - lookback, bar))
+        if not len(calendar) or calendar[-1] != bar:
+            raise QuantlabNotReady(f"the price dataset has no bar at {bar.date()}")
+        close, _ = self._marks(calendar[0], bar)
+        return close.loc[bar].rename_axis("symbol")
+
+    def _marks(self, start, end) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """The raw close marks and the delisting flags of every bar from ``start`` to ``end``."""
+        valuation_column = self._market.valuation_price_column
+        prices = self._dataset.panel(start, end).load()
+        raw_close = prices["close"].transpose("timestamp", "symbol").to_pandas()
+        delisted = self._dataset.delisting_bars(prices, valuation_column).to_pandas()
+        last_value = _last_valuation(
+            raw_close, prices[valuation_column].transpose("timestamp", "symbol").to_pandas()
+        )
+        return raw_close.mask(delisted, last_value).ffill(), delisted
 
     @property
     def init_cash(self) -> float:

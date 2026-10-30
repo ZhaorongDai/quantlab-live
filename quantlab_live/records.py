@@ -17,6 +17,7 @@ and positions; these records hold what it does not.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -370,6 +371,127 @@ def read_security_map(directory) -> SecurityMap | None:
     for column in ("first", "last"):
         history[column] = pd.to_datetime(history[column])
     return SecurityMap(history, table.schema.metadata[b"date"].decode())
+
+
+@dataclass(frozen=True)
+class StepReport:
+    """What one node process reports to the supervisor, its only channel to it.
+
+    The node writes it to the path it is given, at least once when its
+    start-up has passed (``started``) and again when it ends; a process that
+    ends with ``started`` set and ``finished`` unset crashed.
+
+    Attributes
+    ----------
+    mode : str
+        ``"trade"`` or ``"settle"`` (settle-only).
+    started : bool
+        The start guards passed and the node runs.
+    finished : bool
+        The node ran to its end.
+    outcomes : bool
+        The day's outcomes are written.
+    error : str, optional
+        Why the node failed.
+    alerts : tuple of str
+        Things to mail (a held position no symbol maps to, a foreign
+        position on a target, an outcome that needs checking); each goes out
+        once.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> path = Path(tempfile.mkdtemp()) / "1-trade.json"
+    >>> _ = write_step_report(path, StepReport("trade", started=True, alerts=("5 shares of X unmapped",)))
+    >>> read_step_report(path)
+    StepReport(mode='trade', started=True, finished=False, outcomes=False, error=None, alerts=('5 shares of X unmapped',))
+    """
+
+    mode: str
+    started: bool = False
+    finished: bool = False
+    outcomes: bool = False
+    error: str | None = None
+    alerts: tuple[str, ...] = ()
+
+
+def write_step_report(path, report: StepReport) -> Path:
+    """Write a node's step report by tmp, fsync and rename.
+
+    Examples
+    --------
+    See ``StepReport``.
+    """
+    text = json.dumps({**report.__dict__, "alerts": list(report.alerts)}, indent=1)
+    return _write_text(Path(path), text)
+
+
+def read_step_report(path) -> StepReport:
+    """Read a node's step report.
+
+    Examples
+    --------
+    See ``StepReport``.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return StepReport(**{**raw, "alerts": tuple(raw.get("alerts", ()))})
+
+
+def has_outcomes(directory, bar: pd.Timestamp) -> bool:
+    """Whether ``bar``'s outcomes are written.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> has_outcomes(tempfile.mkdtemp(), pd.Timestamp("2024-01-02"))
+    False
+    """
+    return _path(directory, OUTCOMES, bar).exists()
+
+
+def has_decision(directory, bar: pd.Timestamp) -> bool:
+    """Whether ``bar`` is decided.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> has_decision(tempfile.mkdtemp(), pd.Timestamp("2024-01-02"))
+    False
+    """
+    return _path(directory, DECISIONS, bar).exists()
+
+
+def latest_snapshot(directory, before) -> Snapshot | None:
+    """Return the latest snapshot at a bar before the day ``before``; ``None`` without one.
+
+    Examples
+    --------
+    >>> import tempfile
+    >>> directory = tempfile.mkdtemp()
+    >>> positions = pd.DataFrame({"quantity": [50.0]}, index=pd.Index([10001], name="symbol"))
+    >>> _ = write_snapshot(directory, Snapshot(pd.Timestamp("2024-01-02"), positions, cash=475.0))
+    >>> latest_snapshot(directory, pd.Timestamp("2024-01-03")).bar.date().isoformat()
+    '2024-01-02'
+    >>> latest_snapshot(directory, pd.Timestamp("2024-01-02")) is None
+    True
+    """
+    folder = Path(directory) / SNAPSHOTS
+    limit = pd.Timestamp(before).date().isoformat()
+    days = sorted(p.stem for p in folder.glob("*.parquet")) if folder.exists() else []
+    days = [d for d in days if d < limit]
+    return read_snapshot(directory, pd.Timestamp(days[-1])) if days else None
+
+
+def _write_text(path: Path, text: str) -> Path:
+    """Write ``text`` by tmp, fsync and rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as file:
+        file.write(text)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(tmp, path)
+    return path
 
 
 def _path(directory, kind: str, bar: pd.Timestamp) -> Path:

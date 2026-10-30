@@ -51,3 +51,15 @@ A symbol with no instrument on the day; a target on it is skipped and stays in c
 
 **Order outcome**:
 What an ordered symbol of a decision came to, exactly one per symbol: filled, partially filled, cancelled (by us), venue cancelled (with or without a fallback), rejected, unmapped, foreign, not sent or unverified.
+
+**Live day**:
+One New York trading day of a live directory, run by its supervisor: prepare, value, start the node, settle, the post-close mail.
+
+**Latest start**:
+The plan's execution time (the opening or closing auction's cut-off, or the `HH:MM` time) minus the start margin; a node not started by then leaves the day not traded. It is also the cut-off of quantlab's data and prediction.
+
+**Day state**:
+The supervisor's record of a live day (prepare polls, node attempts, mails, heartbeat); only the supervisor writes it.
+
+**Step report**:
+What one node process tells the supervisor (started, finished, outcomes written, error, alerts); the node's only channel to it.
