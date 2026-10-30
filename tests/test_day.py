@@ -211,3 +211,12 @@ def test_status_prints_the_state_and_the_effective_configuration_and_writes_noth
     assert '"done": "traded"' in text
     assert "start_margin_minutes = 20" in text and "trader_id = \"QL-LIVE\"" in text
     assert (live_dir / "day" / f"{DAY}.json").read_bytes() == before
+
+
+def test_the_report_is_written_after_the_close_and_a_failing_one_fails_nothing(live_dir):
+    records.append_equity(live_dir, pd.Timestamp("2024-01-01"), cash=10_000.0, holdings=0.0)
+    p = ports(live_dir)
+    assert day(live_dir, p) == "traded"  # the run "../run" does not exist, so the report fails
+    log = (live_dir / "logs" / f"{DAY}.log").read_text()
+    assert "the report failed" in log
+    assert "after the close" in p.mailer.subjects[-1]

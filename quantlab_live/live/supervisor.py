@@ -12,7 +12,8 @@ A trading day runs these steps, in order:
    close;
 4. the node trades and stops after the close;
 5. settle, with a settle-only node, while the day's outcomes are missing;
-6. the post-close mail.
+6. the post-close mail, after ``metrics.json`` and ``report.html`` are
+   written from the records.
 
 ``what_now(now, schedule, state)`` is the pure function that picks the next
 step; ``day`` takes the day lock, resumes the day state and runs the steps
@@ -43,7 +44,7 @@ from quantlab_live import records
 from quantlab_live.live.config import LiveConfig, load_config
 from quantlab_live.live.ports import Ports, default_ports
 from quantlab_live.live.value import value
-from quantlab_live.quantlab_gate import Pending, Ready
+from quantlab_live.quantlab_gate import Ready, open_run
 from quantlab_live.trading.scheduled_execution import NEW_YORK, Session
 
 DAY_DIR = "day"
@@ -653,9 +654,20 @@ class _Supervisor:
             check = None if unverified.empty else f"{len(unverified)} outcomes are unverified"
         else:
             body, check = "", f"the day's outcomes are missing after settling until {_ny(self.schedule.settle_until)}"
+        self._report()
         subject = "after the close" + (": NEEDS CHECKING" if check else "")
         state = self._mail(state, subject, (f"Needs checking: {check}.\n\n" if check else "") + body)
         return replace(state, done="traded" + (f"; outcomes need checking: {check}" if check else ""))
+
+    def _report(self) -> None:
+        """Write ``metrics.json`` and ``report.html`` from the records; a failure is only logged."""
+        if not (self.live_dir / records.EQUITY).exists():
+            return
+        try:
+            open_run(self.config.run_dir).report(self.live_dir)
+            self.log("wrote metrics.json and report.html")
+        except Exception as error:  # noqa: BLE001 - the report never fails a step
+            self.log(f"the report failed: {error!r}")
 
     # -- mails and the log
 

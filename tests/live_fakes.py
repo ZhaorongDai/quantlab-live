@@ -130,7 +130,7 @@ def finishes_at(t: pd.Timestamp | None, *, bar: pd.Timestamp | None = None, outc
             return None
         if outcomes and bar is not None:
             frame = pd.DataFrame(
-                {"order_quantity": [10.0], "filled_quantity": [10.0], "avg_px": [20.0], "status": ["filled"]},
+                {"order_quantity": [10.0], "filled_quantity": [10.0], "avg_px": [20.0], "fees": [1.0], "status": ["filled"]},
                 index=pd.Index([10001], name="symbol"),
             )
             records.write_outcomes(launcher.live_dir, bar, frame)
