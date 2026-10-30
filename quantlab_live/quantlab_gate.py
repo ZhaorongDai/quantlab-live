@@ -165,6 +165,40 @@ class Run:
         frame = prices["open"].transpose("timestamp", "symbol").to_pandas()
         return frame.rename_axis(index=None, columns=None)
 
+    def corporate_actions(self, start=None, end=None) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Return the split factor and the cash dividend of every dataset bar.
+
+        Both are quantlab's shared panel variables, on their ex-dates: the
+        ``splitFactor`` (new shares per old share, 2 for a two-for-one split,
+        1 where none) and the ``divCash`` per share (0 where none).
+
+        Parameters
+        ----------
+        start, end : datetime-like, optional
+            Default to the run's window.
+
+        Returns
+        -------
+        split_factor, dividend : pandas.DataFrame
+            Indexed by bar, one column per symbol; neutral where the
+            dataset has no value.
+
+        Examples
+        --------
+        ::
+
+            split_factor, dividend = run.corporate_actions()
+        """
+        start = self.window[0] if start is None else pd.Timestamp(start)
+        end = self.window[1] if end is None else pd.Timestamp(end)
+        prices = self._dataset.panel(start, end, variables=["splitFactor", "divCash"]).load()
+
+        def frame(name: str, neutral: float) -> pd.DataFrame:
+            values = prices[name].transpose("timestamp", "symbol").to_pandas()
+            return values.fillna(neutral).rename_axis(index=None, columns=None)
+
+        return frame("splitFactor", 1.0), frame("divCash", 0.0)
+
     def targets(self, loop: str) -> DecisionInputs | xr.DataArray:
         """Return the raw inputs of the run's targets.
 

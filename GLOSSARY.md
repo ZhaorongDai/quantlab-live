@@ -19,3 +19,10 @@ A replay that executes a finished rebalance table; fills never feed back into de
 **Rebalance table**:
 Target portfolio weights per decision bar and symbol, finished by quantlab.
 _Avoid_: signal file, order list
+
+**Raw units**:
+Shares and prices as traded on each date, not split adjusted; every record is in raw units.
+
+**Engine unit**:
+A replay engine's unit of quantity: the raw shares of one share at the replay's first bar, so a split never changes a position's quantity. Replay converts engine units to raw units at the edges (the fee model, dividends, the records).
+_Avoid_: adjusted share
