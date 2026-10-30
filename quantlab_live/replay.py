@@ -27,6 +27,7 @@ own reports under ``reports/`` stay in the engine's units.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -67,7 +68,7 @@ from quantlab_live.quantlab_gate import PRICE_PRECISION, open_run
 from quantlab_live.trading.decision_bar import NEW_YORK, DecisionBar, decision_ns
 from quantlab_live.trading.scheduled_execution import ScheduledExecution
 from quantlab_live.trading.strategy import BAR_TAG, QuantlabStrategy
-from quantlab_live.trading.targets import RebalanceTableTargets
+from quantlab_live.trading.targets import ConstructorTargets, RebalanceTableTargets
 
 SIM = Venue("SIM")
 USD = Currency.from_str("USD")
@@ -249,8 +250,10 @@ def replay(
     run_dir,
     out_dir=None,
     *,
-    loop: str = "open",
+    loop: str = "closed",
     plan: str = "open_auction",
+    start=None,
+    end=None,
     broker: str = "ibkr",
     fill_model: FillModel | None = None,
 ) -> Path:
@@ -262,10 +265,17 @@ def replay(
         The quantlab run.
     out_dir : path-like, optional
         The replay directory; defaults to ``replay-<loop>`` inside ``run_dir``.
-    loop : {"open"}
-        ``"open"`` executes the run's finished rebalance table.
+    loop : {"closed", "open"}
+        ``"closed"`` decides every rebalance bar with quantlab's portfolio
+        construction on the holdings the replay has, so fills feed back
+        into the next decision; ``"open"`` executes the run's finished
+        rebalance table.
     plan : {"open_auction"}
         When the orders trade.
+    start, end : datetime-like, optional
+        The replay's window, defaulting to the run's. Only its bars are
+        decided and traded: the orders of its last bar are not (closed
+        loop: not decided; open loop: left unsent, with no print after it).
     broker : {"ibkr"}
         Whose fee model charges the fills.
     fill_model : nautilus_trader.execution.FillModel, optional
@@ -281,8 +291,9 @@ def replay(
     Raises
     ------
     ValueError
-        For a loop this version does not replay, or a broker without a fee
-        model.
+        For an unknown loop, a closed loop on a run quantlab cannot decide
+        again (no prediction panel, or valued at raw prices), or a broker
+        without a fee model.
     RuntimeError
         If the strategy failed on a bar (``out_dir`` then holds the records
         up to that bar).
@@ -291,16 +302,19 @@ def replay(
     --------
     ::
 
-        out_dir = replay("runs/USEquityCrossectionSelectStockVectorBt_20261020", loop="open")
+        out_dir = replay("runs/USEquityCrossectionSelectStockVectorBt_20261020")
+        january = replay(run_dir, loop="open", start="2024-01-02", end="2024-01-31")
     """
-    if loop != "open":
-        raise ValueError(f"loop must be 'open', not {loop!r}")
+    if loop not in ("closed", "open"):
+        raise ValueError(f"loop must be 'closed' or 'open', not {loop!r}")
     run = open_run(run_dir)
+    start = run.window[0] if start is None else pd.Timestamp(start)
+    end = run.window[1] if end is None else pd.Timestamp(end)
     out_dir = Path(run.run_dir / f"replay-{loop}" if out_dir is None else out_dir)
     security_map = IdentityMap()
-    split_factor, dividend = run.corporate_actions()
+    split_factor, dividend = run.corporate_actions(start, end)
     splits = SplitTable(split_factor)
-    bars = [_in_units(bar, splits) for bar in run.bars()]
+    bars = [_in_units(bar, splits) for bar in run.bars(start, end)]
 
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggerConfig(stdout_level=LogLevel.WARNING)))
     engine.add_venue(
@@ -314,7 +328,7 @@ def replay(
         fee_model=brokers.fee_model(broker, splits.shares_per_unit),
         modules=[DividendModule(_dividend_payments(dividend, splits, security_map))],
     )
-    opens = run.opens()
+    opens = run.opens(start, end)
     for symbol in opens.columns:
         engine.add_instrument(_equity(security_map.to_id(symbol)))
     engine.add_data(_opening_prints(splits.to_units(opens), security_map))
@@ -327,8 +341,13 @@ def replay(
     )
     algorithm_id = ExecAlgorithmId("SCHEDULED")
     engine.add_exec_algorithm(ScheduledExecution(algorithm_id, plan=plan))
+    if loop == "closed":
+        inputs = run.targets("closed", end=end)
+        targets, preload = ConstructorTargets(inputs), inputs.preloaded(start, end)
+    else:
+        targets, preload = RebalanceTableTargets(run.targets("open")), contextlib.nullcontext()
     strategy = QuantlabStrategy(
-        RebalanceTableTargets(run.targets("open")),
+        targets,
         security_map,
         algorithm_id,
         on_decision=lambda bar, decision, equity: _record_bar(
@@ -336,7 +355,8 @@ def replay(
         ),
     )
     engine.add_strategy(strategy)
-    engine.run()
+    with preload:
+        engine.run()
     if strategy.failure is not None:
         bar, error = strategy.failure
         engine.dispose()

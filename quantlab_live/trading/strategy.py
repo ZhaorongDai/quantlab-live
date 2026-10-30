@@ -2,9 +2,10 @@
 
 The strategy receives each ``DecisionBar`` in ``on_data`` only; it never
 knows whether it runs live or in a replay. On a bar it values its holdings at
-the bar's marks, asks its target source for the bar's weights, sizes them in
-whole shares and submits the difference to its execution algorithm, which
-decides when the orders reach the venue.
+the bar's marks, asks its target source for the bar's weights given those
+holdings, sizes them in whole shares of the strategy capital and submits the
+difference to its execution algorithm, which decides when the orders reach
+the venue.
 """
 
 from __future__ import annotations
@@ -30,9 +31,14 @@ from quantlab_live.trading.decision_bar import DecisionBar
 
 
 class TargetSource(Protocol):
-    """Where a decision bar's target weights come from."""
+    """Where a decision bar's target weights come from.
 
-    def weights(self, bar: pd.Timestamp) -> pd.Series: ...
+    ``current`` is the weight of each symbol held, valued at the bar's
+    closes on the capital sized on; a source that does not decide on the
+    holdings (a finished rebalance table) ignores it.
+    """
+
+    def weights(self, bar: DecisionBar, current: pd.Series) -> pd.Series: ...
 
 
 class SecurityMap(Protocol):
@@ -68,13 +74,15 @@ class QuantlabStrategy(Strategy):
     Parameters
     ----------
     targets : TargetSource
-        The bar's target weights by symbol (NaN keeps a holding).
+        The bar's target weights by symbol (NaN keeps a holding): a finished
+        rebalance table (open loop) or quantlab's construction on the
+        holdings (closed loop and live). Nothing else differs between them.
     security_map : SecurityMap
         The symbol of each instrument and back.
     exec_algorithm_id : ExecAlgorithmId
         The execution algorithm every order is sent to.
     on_decision : callable, optional
-        Called with the bar, its decision frame and the equity sized on,
+        Called with the bar, its decision frame and the capital sized on,
         before the first order.
 
     Examples
@@ -122,11 +130,12 @@ class QuantlabStrategy(Strategy):
         bar = record.timestamp
         close = record.marks()["close"]
         held = self._holdings()
-        decision, equity = size_orders(
-            self._targets.weights(bar), close, held, self._cash(close, held)
-        )
+        value = held["quantity"] * close.reindex(held.index)
+        capital = strategy_capital(self._cash(close, held) + float(value.sum()))
+        current = value / capital if capital else value * 0.0
+        decision = size_orders(self._targets.weights(record, current), close, held, capital)
         if self._on_decision is not None:
-            self._on_decision(bar, decision, equity)
+            self._on_decision(bar, decision, capital)
         for symbol, quantity in decision["order_quantity"].items():
             instrument_id = self._map.to_id(symbol)
             if quantity == 0 or instrument_id is None:
@@ -163,14 +172,47 @@ class QuantlabStrategy(Strategy):
         return balance - float((held["quantity"] * held["avg_px"]).sum())
 
 
-def size_orders(
-    weights: pd.Series, close: pd.Series, held: pd.DataFrame, cash: float
-) -> tuple[pd.DataFrame, float]:
-    """Size a bar's target weights in whole shares, on equity at the bar's closes.
+def strategy_capital(
+    account_equity: float, initial_capital: float | None = None, pnl: float = 0.0
+) -> float:
+    """Return the capital a decision sizes its orders on.
 
-    Equity is ``cash`` plus the holdings valued at ``close``. A target
-    quantity is ``weight * equity / close`` truncated toward zero; a NaN
-    weight keeps the holding.
+    The strategy capital is ``initial_capital`` plus the strategy's
+    cumulative profit and loss, valued at quantlab's close, capped by the
+    account's equity, so money the strategy has not earned or been given is
+    never used. Without an ``initial_capital`` the orders size on the
+    account's equity.
+
+    Parameters
+    ----------
+    account_equity : float
+        The account's equity at the bar's closes.
+    initial_capital : float, optional
+        The capital given to the strategy.
+    pnl : float, default 0.0
+        The strategy's cumulative profit and loss at the bar's closes.
+
+    Examples
+    --------
+    >>> strategy_capital(50_000.0, initial_capital=10_000.0, pnl=1_250.0)
+    11250.0
+    >>> strategy_capital(9_000.0, initial_capital=10_000.0, pnl=500.0)
+    9000.0
+    >>> strategy_capital(9_000.0)
+    9000.0
+    """
+    if initial_capital is None:
+        return float(account_equity)
+    return float(min(initial_capital + pnl, account_equity))
+
+
+def size_orders(
+    weights: pd.Series, close: pd.Series, held: pd.DataFrame, capital: float
+) -> pd.DataFrame:
+    """Size a bar's target weights in whole shares of ``capital`` at the bar's closes.
+
+    A target quantity is ``weight * capital / close`` truncated toward zero;
+    a NaN weight, or a held symbol without a weight, keeps the holding.
 
     Parameters
     ----------
@@ -180,34 +222,30 @@ def size_orders(
         The bar's raw close by symbol.
     held : pandas.DataFrame
         ``quantity`` held by symbol.
-    cash : float
-        The account's cash.
+    capital : float
+        The capital sized on (``strategy_capital``).
 
     Returns
     -------
-    decision : pandas.DataFrame
+    pandas.DataFrame
         By symbol of ``weights`` and ``held``: ``weight``, ``close``,
         ``position_quantity``, ``target_quantity`` and ``order_quantity``.
-    equity : float
-        The equity sized on.
 
     Examples
     --------
     >>> weights = pd.Series({1: 0.5, 2: float("nan")})
     >>> close = pd.Series({1: 10.0, 2: 20.0})
     >>> held = pd.DataFrame({"quantity": [5.0]}, index=[2])
-    >>> decision, equity = size_orders(weights, close, held, cash=900.0)
-    >>> equity, decision["order_quantity"].to_dict()
-    (1000.0, {1: 50.0, 2: 0.0})
+    >>> size_orders(weights, close, held, capital=1_000.0)["order_quantity"].to_dict()
+    {1: 50.0, 2: 0.0}
     """
     symbols = weights.index.union(held.index)
     position = held["quantity"].reindex(symbols, fill_value=0.0)
     marks = close.reindex(symbols)
-    equity = cash + float((position * marks).sum())
     weight = weights.reindex(symbols)
-    target = (weight * equity / marks).map(lambda q: float(math.trunc(q)) if math.isfinite(q) else q)
+    target = (weight * capital / marks).map(lambda q: float(math.trunc(q)) if math.isfinite(q) else q)
     target = target.where(weight.notna(), position)
-    decision = pd.DataFrame(
+    return pd.DataFrame(
         {
             "weight": weight,
             "close": marks,
@@ -216,4 +254,3 @@ def size_orders(
             "order_quantity": target - position,
         }
     ).rename_axis("symbol")
-    return decision, equity

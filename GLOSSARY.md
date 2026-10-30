@@ -16,6 +16,9 @@ A replay in which quantlab's portfolio construction decides on every rebalance b
 **Open-loop replay**:
 A replay that executes a finished rebalance table; fills never feed back into decisions.
 
+**Strategy capital**:
+What a decision sizes its orders on: `initial_capital` plus the strategy's cumulative profit and loss, valued at quantlab's close and capped by the account's equity; the account's equity when `initial_capital` is unset.
+
 **Rebalance table**:
 Target portfolio weights per decision bar and symbol, finished by quantlab.
 _Avoid_: signal file, order list
