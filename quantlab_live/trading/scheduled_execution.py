@@ -283,6 +283,10 @@ class ScheduledExecution(ExecutionAlgorithm):
         The kernel's environment. A Python ``ExecutionAlgorithm`` of
         NautilusTrader 2.0.0rc8 cannot read it, so whoever builds the kernel
         passes it.
+    session : Session, optional
+        The one session the orders trade in (a live node's day); by default
+        the session at each order's time (``Session.of``), as a replay of
+        many days needs.
 
     Examples
     --------
@@ -295,16 +299,20 @@ class ScheduledExecution(ExecutionAlgorithm):
         # The native base takes only a configuration; __init__ passes it.
         return super().__new__(cls)
 
-    def __init__(self, exec_algorithm_id: ExecAlgorithmId, plan: ExecutionPlan, environment: Environment):
+    def __init__(
+        self, exec_algorithm_id: ExecAlgorithmId, plan: ExecutionPlan, environment: Environment,
+        session: Session | None = None,
+    ):
         super().__init__(ExecutionAlgorithmConfig(exec_algorithm_id=exec_algorithm_id))
         self._plan = plan
+        self._session = session
         self._backtest = environment == Environment.BACKTEST
         # NautilusTrader's sandbox, like its simulator, rejects auction time in force.
         self._sandbox = environment == Environment.SANDBOX
 
     def on_order(self, order) -> None:
         now = self._now()
-        todo = action(now, self._plan, Session.of(now))
+        todo = action(now, self._plan, self._session_at(now))
         if todo.child == "none":
             self.deny_order(order, todo.reason)
             return
@@ -325,7 +333,7 @@ class ScheduledExecution(ExecutionAlgorithm):
         if any(isinstance(e, OrderPendingCancel) for e in child.events()):
             return  # we asked for it
         now = self._now()
-        todo = action(now, self._plan, Session.of(now), auction_missed=True)
+        todo = action(now, self._plan, self._session_at(now), auction_missed=True)
         primary = self.cache.order(child.exec_spawn_id)
         if todo.child == "none":
             self.log.warning(f"{child.client_order_id} ended unfilled: {todo.reason}")
@@ -399,7 +407,7 @@ class ScheduledExecution(ExecutionAlgorithm):
         elif limit:
             if self._backtest:
                 # The simulator never expires a DAY order; this one expires at the close.
-                close = Session.of(pd.Timestamp(self.clock.timestamp_ns(), tz="UTC")).close
+                close = self._session_at(self._now()).close
                 child = self.spawn_limit(
                     primary, quantity, price, TimeInForce.GTD, expire_time=close.to_pydatetime(),
                     tags=tags, reduce_primary=reduce,
@@ -418,6 +426,9 @@ class ScheduledExecution(ExecutionAlgorithm):
 
     def _now(self) -> pd.Timestamp:
         return pd.Timestamp(self.clock.timestamp_ns(), tz="UTC")
+
+    def _session_at(self, now: pd.Timestamp) -> Session:
+        return self._session if self._session is not None else Session.of(now)
 
 
 def _child_kind(order) -> str | None:

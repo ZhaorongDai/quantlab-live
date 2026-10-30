@@ -23,7 +23,7 @@ from nautilus_trader.common import DataActor, DataActorConfig, Environment
 from nautilus_trader.model import ActorId, ClientId, CustomData, DataType, ExecAlgorithmId, InstrumentId
 
 from quantlab_live.trading.decision_bar import DecisionBar
-from quantlab_live.trading.scheduled_execution import ExecutionPlan, ScheduledExecution
+from quantlab_live.trading.scheduled_execution import ExecutionPlan, ScheduledExecution, Session
 from quantlab_live.trading.strategy import DecisionRecords, QuantlabStrategy, SecurityMap
 from quantlab_live.trading.targets import ConstructorTargets, RebalanceTableTargets
 
@@ -147,6 +147,7 @@ def parts(
     on_refused: Callable[[str], None] | None = None,
     external_order_claims: Sequence[InstrumentId] = (),
     instrument_client: ClientId | None = None,
+    session: Session | None = None,
 ) -> TradingParts:
     """Return the strategy, execution algorithm and actors of a node or a replay.
 
@@ -179,6 +180,9 @@ def parts(
         The instruments the strategy claims at reconciliation.
     instrument_client : ClientId, optional
         The data client that loads an instrument at runtime.
+    session : Session, optional
+        A node's one session (``ScheduledExecution``); a replay's orders
+        trade in the session of their time.
 
     Raises
     ------
@@ -218,4 +222,4 @@ def parts(
         dry_run=dry_run,
     )
     source = None if bars is None else DecisionSource(bars, check=check, on_refused=on_refused)
-    return TradingParts(strategy, ScheduledExecution(EXEC_ALGORITHM_ID, plan, environment), source, preloaded)
+    return TradingParts(strategy, ScheduledExecution(EXEC_ALGORITHM_ID, plan, environment, session), source, preloaded)

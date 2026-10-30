@@ -74,6 +74,7 @@ def run_node(
     report=None,
     broker: BrokerProfile | None = None,
     redis: bool = True,
+    session: Session | None = None,
 ) -> records.StepReport:
     """Run the day's node of ``live_dir`` until after the close; return its step report.
 
@@ -100,6 +101,10 @@ def run_node(
         Keep the node's cache in Redis (``LiveConfig.redis_host``). Only
         tests turn it off: such a node restores nothing at a restart, and a
         real-money start is refused without it.
+    session : Session, optional
+        The session traded, which the execution plan and the stop time
+        follow; the XNYS session of ``date`` by default. Tests give one
+        around the wall clock, so their orders trade at once.
 
     Returns
     -------
@@ -126,13 +131,14 @@ def run_node(
         return state["report"]
 
     try:
-        return _run(live_dir, date, settle, dry_run, broker, redis, write, lambda: state["report"].started)
+        return _run(live_dir, date, settle, dry_run, broker, redis, session, write, lambda: state["report"].started)
     except Exception as error:
         return write(error=f"{type(error).__name__}: {error}")
 
 
 def _run(
-    live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker, redis: bool, write, state_started
+    live_dir: Path, date: pd.Timestamp, settle: bool, dry_run: bool, broker, redis: bool, session, write,
+    state_started,
 ) -> records.StepReport:
     config = load_config(live_dir)
     profile = broker or config.profile()
@@ -147,7 +153,7 @@ def _run(
     refusals = refusals_of()
     if refusals:
         return write(error="the start is refused: " + "; ".join(refusals))
-    session = Session.on(date)
+    session = session or Session.on(date)
     bar = decision_bar_of(date)
     run = open_run(config.run_dir)
     security_map = profile.build_map(run.listings(date), date, records.read_security_map(live_dir))
@@ -209,6 +215,7 @@ def _run(
         run, decisions, loop="closed", plan=config.plan, security_map=security_map,
         environment=environment, dry_run=dry_run, bars=bars if bars is not None else [],
         check=check, on_refused=refuse, external_order_claims=claims, instrument_client=data_client,
+        session=session,
     )
     if settle:
         node.add_actor(components.decision_source)  # the start check; it publishes no bar

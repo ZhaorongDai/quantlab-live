@@ -102,6 +102,9 @@ class DirectoryDecisions:
 
 #: The strategy's id: one strategy per trader.
 STRATEGY_ID = StrategyId("QUANTLAB-001")
+#: How long an order waits for its instrument, requested at runtime, in seconds.
+INSTRUMENT_WAIT_SECONDS = 300
+INSTRUMENT_TIMER = "instruments"
 
 
 def _config(external_order_claims=()) -> StrategyConfig:
@@ -153,8 +156,9 @@ class QuantlabStrategy(Strategy):
         start-up reconciliation (live): its holdings.
     instrument_client : ClientId, optional
         The data client to request an instrument from when an order's
-        instrument is not loaded yet (live). The order is submitted once the
-        instrument arrives; one the client cannot find is left unsent.
+        instrument is not loaded yet (live). Each order is submitted once
+        its instrument arrives; an order whose instrument has not arrived
+        ``INSTRUMENT_WAIT_SECONDS`` after the request is left unsent.
     dry_run : bool, default False
         Decide and write the decision, but submit nothing: the orders that
         would be submitted are kept in ``planned``.
@@ -190,6 +194,7 @@ class QuantlabStrategy(Strategy):
         self._dry_run = dry_run
         #: Orders waiting for their instrument: (bar, symbol, quantity, close).
         self._waiting: list[tuple[pd.Timestamp, int, float, float]] = []
+        self._wait_until = 0
         #: A dry run's orders: bar, symbol, instrument id and signed quantity.
         self.planned: list[dict] = []
         #: The first error a decision raised, with its bar; the strategy decides
@@ -261,15 +266,26 @@ class QuantlabStrategy(Strategy):
         if missing:
             self.log.info(f"requesting {len(missing)} instruments not loaded yet")
             self.request_instrument(missing, client_id=self._instrument_client, callback=self._on_instruments)
+            # The request's callback runs on its first response only, so the
+            # waiting orders are also looked at every second until they leave.
+            self._wait_until = self.clock.timestamp_ns() + INSTRUMENT_WAIT_SECONDS * 1_000_000_000
+            if INSTRUMENT_TIMER not in self.clock.timer_names():
+                self.clock.set_timer_ns(INSTRUMENT_TIMER, 1_000_000_000, callback=self._on_instruments)
 
-    def _on_instruments(self, request_id) -> None:
-        """Submit the orders whose instrument a runtime request loaded."""
+    def _on_instruments(self, event) -> None:
+        """Submit the waiting orders whose instrument has arrived; give up on the rest at the deadline."""
         waiting, self._waiting = self._waiting, []
         for bar, symbol, quantity, close in waiting:
             if self.cache.instrument(self._map.to_id(symbol)) is None:
+                self._waiting.append((bar, symbol, quantity, close))
+            else:
+                self._send(bar, symbol, quantity, close)
+        if self._waiting and self.clock.timestamp_ns() >= self._wait_until:
+            for _, symbol, _, _ in self._waiting:
                 self.log.error(f"{self._map.to_id(symbol)} could not be loaded; symbol {symbol} is not sent")
-                continue
-            self._send(bar, symbol, quantity, close)
+            self._waiting = []
+        if not self._waiting and INSTRUMENT_TIMER in self.clock.timer_names():
+            self.clock.cancel_timer(INSTRUMENT_TIMER)
 
     def _send(self, bar: pd.Timestamp, symbol: int, quantity: float, close: float) -> None:
         order = self.order_factory.market(

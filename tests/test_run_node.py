@@ -24,6 +24,7 @@ from quantlab_live.cli import main
 from quantlab_live.live import run_node
 from quantlab_live.live.guards import ARMING_FILE
 from quantlab_live.live.node import DRY_RUN_DIR
+from quantlab_live.trading.scheduled_execution import Session
 from tests.fake_broker import fake_profile
 from tests.quantlab_run_fixture import build_constructor_run
 
@@ -54,14 +55,23 @@ def live_dir(tmp_path, run_dir):
     live_dir = tmp_path / "paper"
     live_dir.mkdir()
     (live_dir / "live.toml").write_text(
-        f'run = "{run_dir}"\nbroker = "ib_sandbox"\nmin_node_seconds = 3\n'
+        f'run = "{run_dir}"\nbroker = "ib_sandbox"\nmin_node_seconds = 10\nstop_after_close_minutes = -60\n'
     )
     return live_dir
 
 
+def around_now() -> Session:
+    """A session that opened an hour ago and closes in an hour: the opening auction's fallback trades at once.
+
+    The node stops ``min_node_seconds`` after its start (``stop_after_close_minutes = -60``).
+    """
+    now = pd.Timestamp.now(tz="UTC")
+    return Session(now - pd.Timedelta(hours=1), now + pd.Timedelta(hours=1))
+
+
 def test_a_node_decides_after_start_up_trades_and_writes_outcomes_and_the_snapshot(live_dir):
     profile, requested = fake_profile(PRICES)
-    report = run_node(live_dir, DATE, broker=profile, redis=False)
+    report = run_node(live_dir, DATE, broker=profile, redis=False, session=around_now())
 
     assert report == records.StepReport("trade", started=True, finished=True, outcomes=True, alerts=report.alerts)
     assert report.error is None
@@ -71,11 +81,15 @@ def test_a_node_decides_after_start_up_trades_and_writes_outcomes_and_the_snapsh
     # Nothing was held, so every target's instrument was requested at runtime.
     assert {i.value for i in requested} == {"AAA=STK.SMART", "BBB=STK.SMART"}
     outcomes = records.read_outcomes(live_dir, BAR)
-    assert set(outcomes.index) == {A, B}
+    # Both orders filled in the sandbox, at the fake broker's ask, with IBKR's fees.
+    assert outcomes["status"].to_dict() == {A: "filled", B: "filled"}
+    assert outcomes["filled_quantity"].to_dict() == ordered["order_quantity"].to_dict()
+    assert outcomes["avg_px"].to_dict() == {A: 13.01, B: 25.01}
+    assert (outcomes["fees"] >= 1.0).all()
     snapshot = records.read_snapshot(live_dir, DATE)
-    filled = outcomes["filled_quantity"]
-    assert snapshot.positions["quantity"].to_dict() == filled[filled != 0].to_dict()
-    assert snapshot.foreign == {} and snapshot.cash == 10_000.0
+    assert snapshot.positions["quantity"].to_dict() == outcomes["filled_quantity"].to_dict()
+    spent = float((outcomes["filled_quantity"] * outcomes["avg_px"]).sum() + outcomes["fees"].sum())
+    assert snapshot.foreign == {} and snapshot.cash == pytest.approx(10_000.0 - spent)
     assert records.decision_capital(live_dir, BAR) == 10_000.0  # sized on the account's equity
     assert (live_dir / "steps" / DATE.date().isoformat() / "manual-trade.json").exists()
     assert records.read_security_map(live_dir).to_id(A).value == "AAA=STK.SMART"
@@ -120,21 +134,21 @@ def test_a_start_whose_account_the_broker_does_not_report_is_refused_before_any_
 
 
 def test_a_restarted_node_resumes_the_decision_it_finds_without_deciding_again(live_dir):
-    run_node(live_dir, DATE, broker=fake_profile(PRICES)[0], redis=False)
+    run_node(live_dir, DATE, broker=fake_profile(PRICES)[0], redis=False, session=around_now())
     path = live_dir / records.DECISIONS / f"{BAR.date()}.parquet"
     written = path.read_bytes()
 
-    report = run_node(live_dir, DATE, broker=fake_profile(PRICES)[0], redis=False)
+    report = run_node(live_dir, DATE, broker=fake_profile(PRICES)[0], redis=False, session=around_now())
 
     assert (report.started, report.finished, report.error) == (True, True, None)
     assert path.read_bytes() == written
 
 
 def test_a_settle_only_node_trades_nothing_stops_once_reconciled_and_writes_the_outcomes(live_dir):
-    run_node(live_dir, DATE, dry_run=False, broker=fake_profile(PRICES)[0], redis=False)
+    run_node(live_dir, DATE, dry_run=False, broker=fake_profile(PRICES)[0], redis=False, session=around_now())
     (live_dir / records.OUTCOMES / f"{BAR.date()}.parquet").unlink()
     profile, requested = fake_profile(PRICES)
-    (live_dir / "live.toml").write_text((live_dir / "live.toml").read_text().replace("min_node_seconds = 3", "min_node_seconds = 120"))
+    (live_dir / "live.toml").write_text((live_dir / "live.toml").read_text().replace("min_node_seconds = 10", "min_node_seconds = 120"))
 
     started = time.monotonic()
     report = run_node(live_dir, DATE, settle=True, broker=profile, redis=False)
@@ -149,7 +163,7 @@ def test_a_settle_only_node_trades_nothing_stops_once_reconciled_and_writes_the_
 
 
 def test_a_day_quantlab_has_not_made_yet_is_reported(live_dir):
-    report = run_node(live_dir, "2024-01-09", broker=fake_profile(PRICES)[0], redis=False)
+    report = run_node(live_dir, "2024-01-09", broker=fake_profile(PRICES)[0], redis=False, session=around_now())
 
     assert not report.started and "quantlab is not ready" in report.error
 

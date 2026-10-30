@@ -136,3 +136,7 @@ Each entry gives the limitation, the workaround and where it lives, and how to c
 37. **The notional cap is per instrument.** `LiveRiskEngineConfig.max_notional_per_order` maps an instrument id to a cap (in its quote currency); there is no cap for every instrument, and an instrument it does not name is not capped. Its order submit rate defaults to 100 a second.
     - Workaround: `live.toml`'s `max_notional_per_order` is set on every instrument of the day's security map, the only instruments the strategy trades, and its `max_order_submit_rate` is passed only when set; a real-money start needs both (`live/config.py`, `live/node.py`, `live/guards.py`).
     - Check: the parameters of `LiveRiskEngineConfig`; the `ib_sandbox` smoke test's capped node (`tests/test_ib_sandbox.py`) sends nothing above the cap.
+
+38. **A request's callback runs once.** `request_instrument` with several instrument ids calls its callback on the first response only, so instruments that arrive in later responses go unnoticed by it.
+    - Workaround: while orders wait for their instruments, `QuantlabStrategy` also looks at the cache every second, and leaves unsent only the orders whose instrument has not arrived `INSTRUMENT_WAIT_SECONDS` after the request (`trading/strategy.py`).
+    - Check: request two instruments from a data client that answers each in its own response (`tests/fake_broker.py`), and count the callbacks.
