@@ -9,6 +9,8 @@ decision per day; files are per date. Layout of a live or replay directory:
 - ``snapshots/<date>.parquet``: positions by symbol and cash, at a bar's close;
 - ``equity.parquet``: the strategy's equity, one row per bar;
 - ``security_map.parquet``: the security map's history (live only).
+- ``archive/``: NautilusTrader's streaming archive of every event (live
+  only, ``live.node``).
 
 The account history (``account.toml``, one per account) lists the account's
 strategy segments in order; ``record_segment`` starts one.

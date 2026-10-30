@@ -7,7 +7,8 @@ the supervisor through its step report only (``records.StepReport``):
    with the real-money switches of ``live.toml`` and the arming file;
 2. the security map is rebuilt on the day from the run's listings, on top of
    its history;
-3. a ``LiveNode`` is built with the broker profile's clients, the risk
+3. a ``LiveNode`` is built with the broker profile's clients, its
+   streaming archive in ``archive/`` (every event, for audit), the risk
    engine's notional cap on every mapped instrument and its submit rate
    (``LiveConfig.risk_engine_config``), its cache in
    Redis under the live directory's fixed ``trader_id``, and the trading
@@ -42,7 +43,8 @@ import nautilus_trader
 import pandas as pd
 from nautilus_trader.common import DataActor, DataActorConfig, Environment, LoggerConfig, LogLevel
 from nautilus_trader.infrastructure import RedisCacheConfig
-from nautilus_trader.live import LiveNode
+from nautilus_trader.live import LiveNodeBuilder, LiveNodeConfig
+from nautilus_trader.persistence import StreamingConfig
 from nautilus_trader.model import AccountId, ActorId, ClientId, TraderId
 
 from quantlab_live import records, trading
@@ -56,6 +58,9 @@ from quantlab_live.trading.strategy import STRATEGY_ID, DirectoryDecisions, acco
 
 #: Where a dry run writes its decisions and planned orders, in the live directory.
 DRY_RUN_DIR = "dry-run"
+#: NautilusTrader's streaming archive of every event, in the live directory
+#: (under ``DRY_RUN_DIR`` for a dry run): ``<environment>/<instance id>/<type>/``.
+ARCHIVE_DIR = "archive"
 #: A dry run's planned orders, per date, under ``DRY_RUN_DIR``.
 PLANNED_ORDERS = "orders"
 #: How often the market-data actor looks for instruments to subscribe to, in nanoseconds.
@@ -176,8 +181,14 @@ def _run(
     simulated = profile.simulated
     environment = Environment.SANDBOX if simulated else Environment.LIVE
 
+    archive = (live_dir / DRY_RUN_DIR if dry_run else live_dir) / ARCHIVE_DIR
+    archive.mkdir(parents=True, exist_ok=True)
+    node_config = LiveNodeConfig(
+        environment=environment, trader_id=TraderId(config.node_trader_id),
+        streaming=StreamingConfig(writer_path=str(archive)),
+    )
     builder = (
-        LiveNode.builder("QUANTLAB-LIVE", TraderId(config.node_trader_id), environment)
+        LiveNodeBuilder.from_config("QUANTLAB-LIVE", node_config)
         .with_logging(LoggerConfig(stdout_level=LogLevel.INFO))
         .with_reconciliation(not simulated)
         .with_risk_engine_config(config.risk_engine_config(security_map.ids()))

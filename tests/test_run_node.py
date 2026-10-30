@@ -23,7 +23,7 @@ from quantlab_live import records
 from quantlab_live.cli import main
 from quantlab_live.live import run_node
 from quantlab_live.live.guards import ARMING_FILE
-from quantlab_live.live.node import DRY_RUN_DIR
+from quantlab_live.live.node import ARCHIVE_DIR, DRY_RUN_DIR
 from quantlab_live.trading.scheduled_execution import Session
 from tests.fake_broker import fake_profile
 from tests.quantlab_run_fixture import build_constructor_run
@@ -92,6 +92,9 @@ def test_a_node_decides_after_start_up_trades_and_writes_outcomes_and_the_snapsh
     assert snapshot.foreign == {} and snapshot.cash == pytest.approx(10_000.0 - spent)
     assert records.decision_capital(live_dir, BAR) == 10_000.0  # sized on the account's equity
     assert (live_dir / "steps" / DATE.date().isoformat() / "manual-trade.json").exists()
+    # The streaming archive keeps the node's events, the orders' among them.
+    archived = {p.parent.name for p in (live_dir / ARCHIVE_DIR).rglob("*.feather")}
+    assert {"order_filled", "account_state"} <= archived, archived
     assert records.read_security_map(live_dir).to_id(A).value == "AAA=STK.SMART"
 
 
