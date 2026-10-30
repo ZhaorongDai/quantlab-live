@@ -10,10 +10,14 @@ A trading day runs these steps, in order:
    latest start (the plan's execution time minus the start margin); a
    node that crashes is restarted at once, as often as needed, until the
    close;
-4. the node trades and stops after the close;
+4. the node trades and stops after the close; once the open is
+   ``after_open_minutes`` past, the after-open mail goes out (``brief``:
+   the decision, its orders and the previous close's briefing);
 5. settle, with a settle-only node, while the day's outcomes are missing;
 6. the post-close mail, after ``metrics.json`` and ``report.html`` are
-   written from the records.
+   written from the records, and the account history starts a strategy
+   segment when the day's orders were the strategy's first to reach the
+   broker (``records.record_segment``).
 
 ``what_now(now, schedule, state)`` is the pure function that picks the next
 step; ``day`` takes the day lock, resumes the day state and runs the steps
@@ -41,6 +45,7 @@ from pathlib import Path
 import pandas as pd
 
 from quantlab_live import records
+from quantlab_live.live.brief import briefing
 from quantlab_live.live.config import LiveConfig, load_config
 from quantlab_live.live.ports import Ports, default_ports
 from quantlab_live.live.value import value
@@ -72,6 +77,8 @@ class DaySchedule:
     latest_start : pandas.Timestamp
         The plan's execution time minus the start margin; also the cut-off
         of the data and the prediction.
+    after_open : pandas.Timestamp
+        When the after-open mail goes out.
     close : pandas.Timestamp
         The session's close, early closes included; crashes are restarted
         until then.
@@ -91,6 +98,7 @@ class DaySchedule:
     session: Session | None
     start_after: pd.Timestamp | None = None
     latest_start: pd.Timestamp | None = None
+    after_open: pd.Timestamp | None = None
     close: pd.Timestamp | None = None
     settle_until: pd.Timestamp | None = None
     prepare_every: pd.Timedelta = pd.Timedelta(minutes=15)
@@ -116,6 +124,7 @@ class DaySchedule:
             session,
             start_after=session.at(config.start_after),
             latest_start=execution - pd.Timedelta(minutes=config.start_margin_minutes),
+            after_open=session.open + pd.Timedelta(minutes=config.after_open_minutes),
             close=session.close,
             settle_until=session.close + pd.Timedelta(minutes=config.settle_minutes),
             prepare_every=pd.Timedelta(minutes=config.prepare_every_minutes),
@@ -165,6 +174,8 @@ class DayState:
         The bar prepared (quantlab's last bar, decided on today).
     valued : bool
         The latest snapshot is valued.
+    briefed : bool
+        The after-open mail went out (or failed to).
     attempts : tuple of Attempt
         The node processes so far.
     alerted : tuple of str
@@ -186,6 +197,7 @@ class DayState:
     pending: str | None = None
     bar: pd.Timestamp | None = None
     valued: bool = False
+    briefed: bool = False
     attempts: tuple[Attempt, ...] = ()
     alerted: tuple[str, ...] = ()
     mails: tuple[dict, ...] = ()
@@ -249,6 +261,11 @@ class Start:
 
 
 @dataclass(frozen=True)
+class AfterOpen:
+    """Mail the decision, its orders and the previous close's briefing."""
+
+
+@dataclass(frozen=True)
 class NotTraded:
     """The day cannot trade; mail why and end it."""
 
@@ -260,14 +277,16 @@ class PostClose:
     """Mail the day's fills and outcomes and end it."""
 
 
-Step = Done | Wait | Prepare | Value | Start | NotTraded | PostClose
+Step = Done | Wait | Prepare | Value | Start | AfterOpen | NotTraded | PostClose
 
 
 def what_now(now: pd.Timestamp, schedule: DaySchedule, state: DayState) -> Step:
     """Return the supervisor's next step at ``now``.
 
     A pure function of the time, the day's schedule and its state; the
-    supervisor runs the step and asks again.
+    supervisor runs the step and asks again. The after-open mail takes the
+    place of a wait, once a node was started and the open is
+    ``after_open_minutes`` past.
 
     Examples
     --------
@@ -278,6 +297,14 @@ def what_now(now: pd.Timestamp, schedule: DaySchedule, state: DayState) -> Step:
     >>> what_now(now, DaySchedule.of("2024-07-04", config), DayState("2024-07-04"))
     Done(reason='2024-07-04 is not an XNYS trading day')
     """
+    step = _next(now, schedule, state)
+    if isinstance(step, Wait) and state.valued and not state.briefed and state.attempts and now >= schedule.after_open:
+        # The after-open mail goes out while the supervisor would only wait.
+        return AfterOpen()
+    return step
+
+
+def _next(now: pd.Timestamp, schedule: DaySchedule, state: DayState) -> Step:
     if schedule.session is None:
         return Done(f"{schedule.date.date()} is not an XNYS trading day")
     if state.done is not None:
@@ -590,6 +617,8 @@ class _Supervisor:
                 return replace(state, attempts=state.attempts + (failed,))
             self.log(f"{step.mode} node {number} launched")
             return replace(state, attempts=state.attempts + (Attempt(step.mode, now, handle=handle),))
+        if isinstance(step, AfterOpen):
+            return self._after_open(state)
         if isinstance(step, NotTraded):
             return self._not_traded(state, step.reason)
         if isinstance(step, PostClose):
@@ -638,6 +667,15 @@ class _Supervisor:
             f"The decision on {state.bar.date()} skipped these symbols:\n" + "\n".join(lines), key="skipped",
         )
 
+    def _after_open(self, state: DayState) -> DayState:
+        try:
+            composed = briefing(self.live_dir, self.date)
+            subject, body = composed.subject(), composed.text()
+        except Exception as error:  # noqa: BLE001 - the briefing never fails a step
+            self.log(f"the briefing failed: {error!r}")
+            subject, body = "after the open: NEEDS CHECKING", f"Needs checking: the briefing failed: {error!r}\n"
+        return replace(self._mail(state, subject, body), briefed=True)
+
     # -- the end of the day
 
     def _not_traded(self, state: DayState, reason: str) -> DayState:
@@ -652,12 +690,25 @@ class _Supervisor:
             unverified = outcomes[outcomes["status"] == "unverified"]
             body = f"Outcomes of the decision on {bar.date()}:\n{outcomes.to_string()}"
             check = None if unverified.empty else f"{len(unverified)} outcomes are unverified"
+            self._record_segment(bar, outcomes)
         else:
             body, check = "", f"the day's outcomes are missing after settling until {_ny(self.schedule.settle_until)}"
         self._report()
         subject = "after the close" + (": NEEDS CHECKING" if check else "")
         state = self._mail(state, subject, (f"Needs checking: {check}.\n\n" if check else "") + body)
         return replace(state, done="traded" + (f"; outcomes need checking: {check}" if check else ""))
+
+    def _record_segment(self, bar: pd.Timestamp, outcomes) -> None:
+        """Start a strategy segment in the account history if the day's orders start one."""
+        segment = records.Segment(
+            bar, str(self.live_dir.absolute()), str(self.config.run_dir), self.config.broker,
+            self.config.initial_capital,
+        )
+        try:
+            if records.record_segment(self.config.account_path, segment, outcomes):
+                self.log(f"a strategy segment starts at {bar.date()} in {self.config.account_path}")
+        except Exception as error:  # noqa: BLE001 - the account history never fails a step
+            self.log(f"recording the strategy segment failed: {error!r}")
 
     def _report(self) -> None:
         """Write ``metrics.json`` and ``report.html`` from the records; a failure is only logged."""

@@ -57,9 +57,29 @@ def test_a_normal_day_trades_and_mails_after_the_close(live_dir):
     assert day(live_dir, p) == "traded"
     assert p.launch_node.modes() == ["trade"]
     assert p.launch_node.started[0].at == ny(DAY, "07:15")
-    assert len(p.mailer.mails) == 1 and "after the close" in p.mailer.subjects[0]
-    assert "filled" in p.mailer.mails[0][1]
+    after_open, after_close = p.mailer.mails
+    assert after_open[0].startswith(f"quantlab-live {DAY}: after the open")
+    assert "after the close" in after_close[0] and "filled" in after_close[1]
+    assert [m["at"] for m in state(live_dir)["mails"]][0] == ny(DAY, "09:45").isoformat()
     assert state(live_dir)["done"] == "traded"
+
+
+def test_the_first_real_orders_start_a_strategy_segment(live_dir):
+    assert day(live_dir, ports(live_dir)) == "traded"
+    (segment,) = records.read_account_history(live_dir / "account.toml")
+    assert segment.start == BAR and segment.live_dir == str(live_dir.absolute())
+
+
+def test_orders_that_never_reached_the_broker_start_no_segment(live_dir):
+    def unsent(launcher, node):
+        report = finishes_at(None, bar=BAR)(launcher, node)
+        outcomes = records.read_outcomes(launcher.live_dir, BAR)
+        outcomes["status"], outcomes["filled_quantity"] = "not_sent", 0.0
+        records.write_outcomes(launcher.live_dir, BAR, outcomes)
+        return report
+
+    assert day(live_dir, ports(live_dir, trade=[unsent])) == "traded"
+    assert records.read_account_history(live_dir / "account.toml") == []
 
 
 def test_a_start_that_fails_until_the_latest_start_is_not_traded_with_one_mail(live_dir):
@@ -170,7 +190,7 @@ def test_a_failing_mailer_never_fails_a_step(live_dir):
               mailer=RecordingMailer(failing=True))
     assert day(live_dir, p) == "traded"
     mails = state(live_dir)["mails"]
-    assert [m["sent"] for m in mails] == [False, False]
+    assert [m["sent"] for m in mails] == [False, False, False]
     assert "the mail server is down" in (live_dir / "logs" / f"{DAY}.log").read_text()
 
 

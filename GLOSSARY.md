@@ -63,3 +63,19 @@ The supervisor's record of a live day (prepare polls, node attempts, mails, hear
 
 **Step report**:
 What one node process tells the supervisor (started, finished, outcomes written, error, alerts); the node's only channel to it.
+
+**Strategy segment**:
+One strategy (a live directory, its run and broker) trading an account, from the first decision bar whose orders reached the broker until another strategy starts the next segment.
+_Avoid_: era, epoch
+
+**Account history**:
+An account's strategy segments in order, one `account.toml` per account; a strategy switch is written down there and nowhere else.
+
+**Close briefing**:
+The after-open mail's account of the previous bar's close: the strategy's equity at quantlab's close beside a closed-loop replay of the current strategy segment, the execution attribution of the gap, the decision recheck, the benchmark by ticker and the foreign positions.
+
+**Execution attribution**:
+The live-versus-replay gap at a close split into decisions, unfilled orders, fill prices, fees and a residual, in cents, summing to the gap exactly; a large residual needs checking.
+
+**Decision recheck**:
+quantlab's construction re-run on a decision's bar and the holdings actually held; it must give the decision's weights bit for bit, and a mismatch needs checking.

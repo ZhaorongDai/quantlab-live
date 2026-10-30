@@ -38,6 +38,13 @@ class LiveConfig:
         The broker profile (``brokers.profile``).
     real_money : bool, default False
         One of the two switches a real-money start needs.
+    account : str or pathlib.Path, optional
+        The account history (``records.read_account_history``): one
+        ``account.toml`` per account, shared by every live directory that
+        trades it; ``account.toml`` in the live directory by default.
+    after_open_minutes : int, default 15
+        How long after the open the after-open mail (the decision, the
+        orders and the close briefing, ``brief``) goes out.
     open_cutoff_minutes, close_cutoff_minutes, fallback_minutes, deadline_minutes : int
         The execution plan's cut-offs (``ExecutionPlan``).
     start_after : str, default ``"07:15"``
@@ -86,6 +93,8 @@ class LiveConfig:
     band_bps: float | None = None
     broker: str = "ibkr_paper"
     real_money: bool = False
+    account: str | Path | None = None
+    after_open_minutes: int = 15
     open_cutoff_minutes: int = 10
     close_cutoff_minutes: int = 15
     fallback_minutes: int = 5
@@ -126,6 +135,11 @@ class LiveConfig:
         return (self.live_dir / self.run).absolute()
 
     @property
+    def account_path(self) -> Path:
+        """The account history, resolved against the live directory."""
+        return (self.live_dir / (self.account or "account.toml")).absolute()
+
+    @property
     def store_dir(self) -> Path:
         """The live prediction store, resolved against the live directory."""
         return (self.live_dir / (self.store or "live_predictions")).absolute()
@@ -156,6 +170,7 @@ class LiveConfig:
         values = {f.name: getattr(self, f.name) for f in dataclasses.fields(self) if f.name != "live_dir"}
         values.update(
             run=str(self.run_dir), store=str(self.store_dir), trader_id=self.node_trader_id,
+            account=str(self.account_path),
             may_lag=[str((self.live_dir / p).absolute()) for p in self.may_lag],
         )
         return values
