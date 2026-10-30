@@ -150,6 +150,7 @@ def parts(
     session: Session | None = None,
     initial_capital: float | None = None,
     pnl: StrategyPnl | None = None,
+    alert: Callable[[str], None] | None = None,
 ) -> TradingParts:
     """Return the strategy, execution algorithm and actors of a node or a replay.
 
@@ -190,6 +191,8 @@ def parts(
         (``QuantlabStrategy``); unset, orders size on the account's equity.
     pnl : StrategyPnl, optional
         The strategy's P&L: ``RecordedPnl`` live, ``AccountPnl`` in a replay.
+    alert : callable, optional
+        Where ``ScheduledExecution`` sends its immediate alerts (live).
 
     Raises
     ------
@@ -231,4 +234,4 @@ def parts(
         pnl=pnl,
     )
     source = None if bars is None else DecisionSource(bars, check=check, on_refused=on_refused)
-    return TradingParts(strategy, ScheduledExecution(EXEC_ALGORITHM_ID, plan, environment, session), source, preloaded)
+    return TradingParts(strategy, ScheduledExecution(EXEC_ALGORITHM_ID, plan, environment, session, alert), source, preloaded)

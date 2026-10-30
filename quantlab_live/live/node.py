@@ -209,7 +209,11 @@ def _run(
     handle = node.handle()
     accounts = [AccountId(c.account_id) for c in exec_clients if c.account_id is not None]
 
-    redecided_alerts: list[str] = []
+    alerts: list[str] = []  # reported at once: the supervisor mails each while the node runs
+
+    def alert(text: str) -> None:
+        alerts.append(text)
+        write(alerts=tuple(alerts))
 
     def check(cache) -> str | None:
         reported = [str(a) for a in accounts if cache.account(a) is not None]
@@ -219,10 +223,10 @@ def _run(
         if not dry_run:
             # Reconciled: what an earlier node could not verify at its stop is known now.
             try:
-                redecided_alerts.extend(redecide_unverified(live_dir, bar, cache, security_map))
+                alerts.extend(redecide_unverified(live_dir, bar, cache, security_map))
             except Exception as error:  # noqa: BLE001 - never refuses the start
-                redecided_alerts.append(f"deciding the unverified outcomes again failed: {error!r}")
-        write(started=True, alerts=tuple(redecided_alerts))
+                alerts.append(f"deciding the unverified outcomes again failed: {error!r}")
+        write(started=True, alerts=tuple(alerts))
         if settle:  # start-up reconciliation is done: nothing is left to wait for
             handle.stop()
         return None
@@ -238,6 +242,7 @@ def _run(
         check=check, on_refused=refuse, external_order_claims=claims, instrument_client=data_client,
         session=session, initial_capital=config.initial_capital,
         pnl=None if config.initial_capital is None else RecordedPnl(live_dir, config.initial_capital),
+        alert=alert,
     )
     if settle:
         node.add_actor(components.decision_source)  # the start check; it publishes no bar
@@ -266,7 +271,7 @@ def _run(
         node.dispose()
         _write_planned(live_dir / DRY_RUN_DIR, date, strategy.planned)
         return write(finished=True)
-    alerts = [*redecided_alerts, *state_alerts(node.cache, security_map)]
+    alerts.extend(state_alerts(node.cache, security_map))
     outcomes = _write_outcomes(live_dir, bar, node.cache, security_map)
     _write_snapshot(live_dir, date, node.cache, security_map, accounts, exec_clients)
     node.dispose()

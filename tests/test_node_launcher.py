@@ -75,6 +75,11 @@ def test_a_node_runs_in_a_fresh_bound_process_and_reports_through_its_step_repor
     (launcher.live_dir / "release").write_text("hold")
     handle = launcher.start(DAY, "trade", 1)
     assert launcher.poll(handle) is None
+    deadline = time.monotonic() + 30
+    while (progress := launcher.progress(handle)) is None:  # what the running node reported so far
+        assert time.monotonic() < deadline, "the node never reported"
+        time.sleep(0.02)
+    assert progress.started and not progress.finished
     (launcher.live_dir / "release").write_text("go")
     report = _until_ended(launcher, handle)
     assert (report.started, report.finished, report.outcomes) == (True, True, True)

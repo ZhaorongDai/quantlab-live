@@ -46,11 +46,13 @@ class SupervisorKilled(Exception):
 class RecordingMailer:
     failing: bool = False
     mails: list[tuple[str, str]] = field(default_factory=list)
+    logs: dict[str, str] = field(default_factory=dict)  # the log section of each mail, by subject
 
-    def send(self, subject: str, body: str) -> None:
+    def send(self, subject: str, body: str, log: str = "") -> None:
         if self.failing:
             raise OSError("the mail server is down")
         self.mails.append((subject, body))
+        self.logs[subject] = log
 
     @property
     def subjects(self) -> list[str]:
@@ -102,6 +104,10 @@ class ScriptedLauncher:
         node = self.started[int(handle)]
         return node.behaviour(self, node)
 
+    def progress(self, handle: str):
+        node = self.started[int(handle)]
+        return getattr(node, "progress", None)
+
     def modes(self) -> list[str]:
         return [s.mode for s in self.started]
 
@@ -119,13 +125,22 @@ def crashes_at(t: pd.Timestamp) -> Behaviour:
     return behaviour
 
 
-def finishes_at(t: pd.Timestamp | None, *, bar: pd.Timestamp | None = None, outcomes: bool = True, on_start=None):
-    """Runs until ``t`` (at once when ``None``), then ends; writes ``bar``'s outcomes when asked."""
+def finishes_at(
+    t: pd.Timestamp | None, *, bar: pd.Timestamp | None = None, outcomes: bool = True, on_start=None,
+    alerts_at: dict | None = None,
+):
+    """Runs until ``t`` (at once when ``None``), then ends; writes ``bar``'s outcomes when asked.
+
+    ``alerts_at`` maps a time to an alert the node reports from then on, while it runs.
+    """
 
     def behaviour(launcher, node):
         if on_start is not None and not getattr(node, "on_start_done", False):
             on_start(launcher.live_dir)
             node.on_start_done = True
+        now = launcher.clock.now()
+        reported = tuple(a for at, a in (alerts_at or {}).items() if now >= at)
+        node.progress = records.StepReport(node.mode, started=True, alerts=reported)
         if t is not None and launcher.clock.now() < t:
             return None
         if outcomes and bar is not None:
@@ -134,6 +149,6 @@ def finishes_at(t: pd.Timestamp | None, *, bar: pd.Timestamp | None = None, outc
                 index=pd.Index([10001], name="symbol"),
             )
             records.write_outcomes(launcher.live_dir, bar, frame)
-        return records.StepReport(node.mode, started=True, finished=True, outcomes=outcomes)
+        return records.StepReport(node.mode, started=True, finished=True, outcomes=outcomes, alerts=reported)
 
     return behaviour

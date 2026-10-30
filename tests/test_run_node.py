@@ -78,6 +78,8 @@ def test_a_node_decides_after_start_up_trades_and_writes_outcomes_and_the_snapsh
     decision = records.read_decision(live_dir, BAR)
     ordered = decision[decision["order_quantity"] != 0]
     assert set(ordered.index) == {A, B}  # the top two
+    # The session opened an hour ago: each order falls back from the opening auction, and that alerts at once.
+    assert sum("falls back to a DAY market order" in alert for alert in report.alerts) == 2, report.alerts
     # Nothing was held, so every target's instrument was requested at runtime.
     assert {i.value for i in requested} == {"AAA=STK.SMART", "BBB=STK.SMART"}
     outcomes = records.read_outcomes(live_dir, BAR)
@@ -268,3 +270,15 @@ def test_orders_size_on_the_initial_capital_plus_the_strategys_pnl_capped_by_the
     decision = records.read_decision(live_dir / DRY_RUN_DIR, BAR)
     spent = (decision["target_quantity"] * decision["close"]).sum()
     assert capital - 50.0 < spent <= capital  # whole shares of the top two, half each
+
+
+def test_a_timed_plan_past_its_deadline_sends_nothing_and_alerts_at_once(live_dir):
+    session = around_now()  # opened an hour ago: a plan at the open is 30 minutes past its deadline
+    at = session.open.tz_convert("America/New_York").strftime("%H:%M")
+    (live_dir / "live.toml").write_text((live_dir / "live.toml").read_text() + f'at = "{at}"\n')
+
+    report = run_node(live_dir, DATE, broker=fake_profile(PRICES)[0], redis=False, session=session)
+
+    assert report.error is None
+    assert records.read_outcomes(live_dir, BAR)["status"].tolist() == ["not_sent", "not_sent"]
+    assert sum(f"past the {at} plan's deadline" in alert for alert in report.alerts) == 2, report.alerts

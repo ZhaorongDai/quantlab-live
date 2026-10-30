@@ -24,7 +24,10 @@ step; ``day`` takes the day lock, resumes the day state and runs the steps
 through four ports (``Ports``): ``prepare``, ``launch_node``, ``mailer`` and
 ``clock``. Only the supervisor writes the day state, a heartbeat included;
 the node reports through its own step report (``records.StepReport``) and
-the records it writes. A mail that fails never fails a step.
+the records it writes. A mail that fails never fails a step. An alert a
+running node reports goes out at once, and every mail attaches its section
+of the day's log: from the start of the node it is about (the latest one),
+at most ``LOG_SECTION_LINES`` lines.
 
 Files of a live directory, per New York date: ``day/<date>.json`` (the day
 state), ``day/<date>.lock`` (the day lock), ``steps/<date>/`` (the node's
@@ -57,6 +60,8 @@ LOG_DIR = "logs"
 #: How often the supervisor beats while it waits.
 HEARTBEAT_EVERY = pd.Timedelta(minutes=1)
 TRADE, SETTLE = "trade", "settle"
+#: The most lines of the day's log a mail attaches: the end of its section.
+LOG_SECTION_LINES = 300
 
 
 # ---------------------------------------------------------------- schedule
@@ -141,7 +146,8 @@ class Attempt:
 
     ``handle`` is the launcher's handle while the process runs, ``None``
     once it ended; then ``started``, ``finished``, ``outcomes`` and
-    ``error`` come from its step report.
+    ``error`` come from its step report. ``log_from`` is where its section
+    of the day's log starts, in bytes.
     """
 
     mode: str
@@ -152,6 +158,7 @@ class Attempt:
     finished: bool = False
     outcomes: bool = False
     error: str | None = None
+    log_from: int = 0
 
     @property
     def running(self) -> bool:
@@ -609,14 +616,15 @@ class _Supervisor:
             return replace(state, valued=True)
         if isinstance(step, Start):
             number = len(state.attempts) + 1
+            log_from = self.log_size()
             try:
                 handle = self.ports.launch_node.start(self.date, step.mode, number)
             except Exception as error:  # noqa: BLE001 - a launch failing is a failed start
                 self.log(f"{step.mode} node {number} failed to launch: {error!r}")
-                failed = Attempt(step.mode, now, ended=now, error=f"the launch failed: {error!r}")
+                failed = Attempt(step.mode, now, ended=now, error=f"the launch failed: {error!r}", log_from=log_from)
                 return replace(state, attempts=state.attempts + (failed,))
             self.log(f"{step.mode} node {number} launched")
-            return replace(state, attempts=state.attempts + (Attempt(step.mode, now, handle=handle),))
+            return replace(state, attempts=state.attempts + (Attempt(step.mode, now, handle=handle, log_from=log_from),))
         if isinstance(step, AfterOpen):
             return self._after_open(state)
         if isinstance(step, NotTraded):
@@ -633,6 +641,10 @@ class _Supervisor:
         last = state.attempts[-1]
         report = self.ports.launch_node.poll(last.handle)
         if report is None:
+            # Still running: what it alerts goes out at once.
+            progress = self.ports.launch_node.progress(last.handle)
+            for alert in progress.alerts if progress is not None else ():
+                state = self._mail(state, "the node alerts", alert, key=f"alert:{alert}")
             return state
         outcomes = report.outcomes or (state.bar is not None and records.has_outcomes(self.live_dir, state.bar))
         ended = replace(
@@ -723,12 +735,13 @@ class _Supervisor:
     # -- mails and the log
 
     def _mail(self, state: DayState, subject: str, body: str, *, key: str | None = None) -> DayState:
-        """Send a mail; a failure is logged and recorded, never raised."""
+        """Send a mail with its log section; a failure is logged and recorded, never raised."""
         if key is not None and key in state.alerted:
             return state
         subject = f"quantlab-live {self.date.date()}: {subject}"
+        log = self.log_section(state.attempts[-1].log_from if state.attempts else 0)
         try:
-            self.ports.mailer.send(subject, body)
+            self.ports.mailer.send(subject, body, log=log)
             sent, error = True, None
         except Exception as failure:  # noqa: BLE001 - a mail never fails a step
             sent, error = False, repr(failure)
@@ -741,9 +754,28 @@ class _Supervisor:
         """Mail from a call that does not hold the lock, and so writes no state."""
         subject = f"quantlab-live {self.date.date()}: {subject}"
         try:
-            self.ports.mailer.send(subject, body)
+            self.ports.mailer.send(subject, body, log=self.log_section(0))
         except Exception as failure:  # noqa: BLE001
             self.log(f"mail {subject!r} failed: {failure!r}")
+
+    def log_size(self) -> int:
+        try:
+            return self.log_path.stat().st_size
+        except FileNotFoundError:
+            return 0
+
+    def log_section(self, start: int) -> str:
+        """The day's log from byte ``start`` on, at most its last ``LOG_SECTION_LINES`` lines."""
+        try:
+            with open(self.log_path, "rb") as file:
+                file.seek(start)
+                text = file.read().decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            return ""
+        lines = text.splitlines()
+        cut = len(lines) > LOG_SECTION_LINES
+        lines = lines[-LOG_SECTION_LINES:]
+        return ("[... earlier lines in " + str(self.log_path) + "]\n" if cut else "") + "\n".join(lines)
 
     def log(self, line: str) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

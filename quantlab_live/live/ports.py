@@ -2,10 +2,13 @@
 
 - ``prepare(date) -> Ready | Pending``: quantlab's data and prediction
   (``quantlab_gate.prepare_day``);
-- ``launch_node``: ``start(date, mode, attempt) -> handle`` starts a node
-  and ``poll(handle) -> StepReport | None`` says whether it ended
-  (``SubprocessLauncher``: a fresh ``node`` process per attempt);
-- ``mailer``: ``send(subject, body)`` (``SmtpMailer``);
+- ``launch_node``: ``start(date, mode, attempt) -> handle`` starts a node,
+  ``poll(handle) -> StepReport | None`` says whether it ended and
+  ``progress(handle) -> StepReport | None`` reads what a running node has
+  reported so far, its alerts among it (``SubprocessLauncher``: a fresh
+  ``node`` process per attempt);
+- ``mailer``: ``send(subject, body, log="")``, with the mail's section of
+  the day's log attached (``SmtpMailer``);
 - ``clock``: ``now()`` and ``sleep(seconds)`` (``WallClock``).
 
 The tests' adapters are fakes of the same shape. There is no broker port
@@ -43,9 +46,11 @@ class NodeLauncher(Protocol):
 
     def poll(self, handle: str) -> records.StepReport | None: ...
 
+    def progress(self, handle: str) -> records.StepReport | None: ...
+
 
 class Mailer(Protocol):
-    def send(self, subject: str, body: str) -> None: ...
+    def send(self, subject: str, body: str, log: str = "") -> None: ...
 
 
 class Clock(Protocol):
@@ -160,9 +165,17 @@ class SubprocessLauncher:
         exit_text = "an unknown status" if code is None else f"status {code}"
         return records.StepReport(mode=node["mode"], error=f"the node exited with {exit_text} without a step report")
 
+    def progress(self, handle: str) -> records.StepReport | None:
+        """Return the step report a running node has written so far; ``None`` before its first."""
+        report = Path(json.loads(handle)["report"])
+        try:
+            return records.read_step_report(report)
+        except (OSError, ValueError):  # not written yet
+            return None
+
 
 class SmtpMailer:
-    """Sends each mail over SMTP with SSL.
+    """Sends each mail over SMTP with SSL; a log section goes as a ``log.txt`` attachment.
 
     ``from_env_file`` reads ``SMTP_HOST``, ``SMTP_PORT`` (465 by default),
     ``SMTP_USER``, ``SMTP_PASSWORD``, ``MAIL_FROM`` (the user by default)
@@ -211,10 +224,12 @@ class SmtpMailer:
         except KeyError as missing:
             return UnconfiguredMailer(f"the mail settings at {path} lack {missing}")
 
-    def send(self, subject: str, body: str) -> None:
+    def send(self, subject: str, body: str, log: str = "") -> None:
         message = EmailMessage()
         message["Subject"], message["From"], message["To"] = subject, self.sender, self.to
         message.set_content(body)
+        if log:
+            message.add_attachment(log, subtype="plain", filename="log.txt")
         with smtplib.SMTP_SSL(self.host, self.port, timeout=60) as smtp:
             smtp.login(self.user, self.password)
             smtp.send_message(message)
@@ -234,7 +249,7 @@ class UnconfiguredMailer:
     def __init__(self, reason: str):
         self.reason = reason
 
-    def send(self, subject: str, body: str) -> None:
+    def send(self, subject: str, body: str, log: str = "") -> None:
         raise RuntimeError(self.reason)
 
 

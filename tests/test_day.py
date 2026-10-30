@@ -240,3 +240,32 @@ def test_the_report_is_written_after_the_close_and_a_failing_one_fails_nothing(l
     log = (live_dir / "logs" / f"{DAY}.log").read_text()
     assert "the report failed" in log
     assert "after the close" in p.mailer.subjects[-1]
+
+
+def test_an_alert_of_a_running_node_is_mailed_at_once_and_only_once(live_dir):
+    fallback = "AAA.NYSE: BUY 100 was ready after the opening auction's cut-off; it falls back"
+    node = finishes_at(ny(DAY, "16:05"), bar=BAR, alerts_at={ny(DAY, "09:36"): fallback})
+    p = ports(live_dir, trade=[node])
+
+    assert day(live_dir, p) == "traded"
+
+    alerts = [m for m in state(live_dir)["mails"] if m["subject"].endswith("the node alerts")]
+    assert len(alerts) == 1
+    assert ny(DAY, "09:36") <= pd.Timestamp(alerts[0]["at"]) <= ny(DAY, "09:38")  # not at the node's end
+    assert dict(p.mailer.mails)[f"quantlab-live {DAY}: the node alerts"] == fallback
+
+
+def test_each_mail_attaches_the_log_section_of_its_node(live_dir):
+    def node_logs(directory):
+        with open(directory / "logs" / f"{DAY}.log", "a") as log:
+            log.write("node: the opening auction child was cancelled by the venue\n")
+
+    p = ports(live_dir, trade=[crashes_at(ny(DAY, "10:00")), finishes_at(ny(DAY, "16:05"), bar=BAR, on_start=node_logs)])
+
+    assert day(live_dir, p) == "traded"
+
+    crash = p.mailer.logs[f"quantlab-live {DAY}: the node crashed, restarting"]
+    assert "trade node 1 launched" in crash and "prepared bar" not in crash
+    after_close = p.mailer.logs[f"quantlab-live {DAY}: after the close"]
+    assert "trade node 2 launched" in after_close and "cancelled by the venue" in after_close
+    assert "trade node 1 launched" not in after_close

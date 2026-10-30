@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import functools
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import exchange_calendars
@@ -287,6 +288,11 @@ class ScheduledExecution(ExecutionAlgorithm):
         The one session the orders trade in (a live node's day); by default
         the session at each order's time (``Session.of``), as a replay of
         many days needs.
+    alert : callable, optional
+        ``alert(text)``, called at once when an order falls back from the
+        opening auction, a closing-auction order is missed or ended by the
+        venue, or a timed plan's order is past its deadline (a live node
+        mails it); such events are only logged without it.
 
     Examples
     --------
@@ -302,10 +308,12 @@ class ScheduledExecution(ExecutionAlgorithm):
     def __init__(
         self, exec_algorithm_id: ExecAlgorithmId, plan: ExecutionPlan, environment: Environment,
         session: Session | None = None,
+        alert: Callable[[str], None] | None = None,
     ):
         super().__init__(ExecutionAlgorithmConfig(exec_algorithm_id=exec_algorithm_id))
         self._plan = plan
         self._session = session
+        self._alert = alert
         self._backtest = environment == Environment.BACKTEST
         # NautilusTrader's sandbox, like its simulator, rejects auction time in force.
         self._sandbox = environment == Environment.SANDBOX
@@ -314,8 +322,14 @@ class ScheduledExecution(ExecutionAlgorithm):
         now = self._now()
         todo = action(now, self._plan, self._session_at(now))
         if todo.child == "none":
+            self._warn(f"{order.instrument_id}: {order.side.name} {order.quantity} is not sent: {todo.reason}")
             self.deny_order(order, todo.reason)
             return
+        if todo.child == "fallback":
+            self._warn(
+                f"{order.instrument_id}: {order.side.name} {order.quantity} was ready after the opening auction's "
+                f"cut-off; it falls back to a DAY market order at {_ny(todo.at)} New York"
+            )
         self._schedule(order, todo, order.quantity)
 
     def on_order_canceled(self, event) -> None:
@@ -335,10 +349,11 @@ class ScheduledExecution(ExecutionAlgorithm):
         now = self._now()
         todo = action(now, self._plan, self._session_at(now), auction_missed=True)
         primary = self.cache.order(child.exec_spawn_id)
+        what = f"{child.instrument_id}: the venue ended the {kind} order {child.client_order_id} with {child.leaves_qty} unfilled"
         if todo.child == "none":
-            self.log.warning(f"{child.client_order_id} ended unfilled: {todo.reason}")
+            self._warn(f"{what} ({todo.reason}); it is venue_cancelled")
             return
-        self.log.warning(f"{child.client_order_id} ended unfilled; falling back at {todo.at}")
+        self._warn(f"{what}; the remainder falls back to a DAY market order at {_ny(todo.at)} New York")
         self._schedule(primary, todo, child.leaves_qty)
 
     def _schedule(self, primary, todo: Action, quantity: Quantity) -> None:
@@ -427,8 +442,17 @@ class ScheduledExecution(ExecutionAlgorithm):
     def _now(self) -> pd.Timestamp:
         return pd.Timestamp(self.clock.timestamp_ns(), tz="UTC")
 
+    def _warn(self, text: str) -> None:
+        self.log.warning(text)
+        if self._alert is not None:
+            self._alert(text)
+
     def _session_at(self, now: pd.Timestamp) -> Session:
         return self._session if self._session is not None else Session.of(now)
+
+
+def _ny(t: pd.Timestamp) -> str:
+    return pd.Timestamp(t).tz_convert(NEW_YORK).strftime("%H:%M")
 
 
 def _child_kind(order) -> str | None:
