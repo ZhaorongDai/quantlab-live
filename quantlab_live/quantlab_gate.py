@@ -414,7 +414,7 @@ class Run:
                 f"quantlab run {self.run_dir} is valued at raw prices; a closed loop "
                 f"decides on adjusted closes"
             )
-        return DecisionInputs.from_run(self._backtest_run, end=end, price_dataset=self._dataset)
+        return DecisionInputs.from_run(self._backtest_run, end=end)
 
     def listings(self, date, symbols=None) -> pd.DataFrame:
         """Return the ticker and primary exchange of each symbol as of ``date``.
@@ -576,7 +576,7 @@ def open_run(run_dir: str | Path) -> Run:
         backtest_run = BacktestRun.open(run_dir)
     except (FileNotFoundError, ValueError) as error:
         raise ValueError(f"{run_dir} is not a quantlab run directory: {error}") from error
-    dataset = backtest_run.rebuild("price_dataset")
+    dataset = backtest_run.price_dataset
     if not isinstance(dataset, MarketDataset):
         raise ValueError(
             f"quantlab run {run_dir}: its price dataset {type(dataset).__name__} "
