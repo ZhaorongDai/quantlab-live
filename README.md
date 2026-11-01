@@ -21,9 +21,6 @@ projects/
   quantlab-live/   this repository
 ```
 
-Until quantlab's changes for this repository reach its `main`, the quantlab checkout is on its
-branch `quantlab-live-support` (CI checks out the same branch).
-
 ```
 uv sync
 uv run pytest -n auto

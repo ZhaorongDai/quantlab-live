@@ -15,8 +15,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ZhaorongDai/quantlab
-          # quantlab's changes for quantlab-live, until they reach its main.
-          ref: quantlab-live-support
           path: quantlab
       - uses: astral-sh/setup-uv@v6
         with:
