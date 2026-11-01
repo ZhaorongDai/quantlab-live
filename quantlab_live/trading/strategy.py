@@ -360,9 +360,11 @@ class QuantlabStrategy(Strategy):
                 self._send(bar, symbol, float(quantity), float(close[symbol]))
         if missing:
             self.log.info(f"requesting {len(missing)} instruments not loaded yet")
-            self.request_instrument(missing, client_id=self._instrument_client, callback=self._on_instruments)
-            # The request's callback runs on its first response only, so the
-            # waiting orders are also looked at every second until they leave.
+            # IB's adapter takes one instrument per request.
+            for instrument_id in missing:
+                self.request_instrument(instrument_id, client_id=self._instrument_client, callback=self._on_instruments)
+            # A request's callback may run before its instrument is cached, so
+            # the waiting orders are also looked at every second until they leave.
             self._wait_until = self.clock.timestamp_ns() + INSTRUMENT_WAIT_SECONDS * 1_000_000_000
             if INSTRUMENT_TIMER not in self.clock.timer_names():
                 self.clock.set_timer_ns(INSTRUMENT_TIMER, 1_000_000_000, callback=self._on_instruments)

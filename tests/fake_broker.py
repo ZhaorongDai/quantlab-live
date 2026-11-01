@@ -2,7 +2,7 @@
 
 The data client stands in for a broker's market data: it serves an equity
 instrument for any id it is asked for (at connect for the ids to load, and at
-runtime on a request) and, on a quote subscription, one quote around the
+runtime on a request for one instrument, the only kind IB's adapter takes) and, on a quote subscription, one quote around the
 instrument's price. The orders fill in NautilusTrader's sandbox execution
 client on the ``SMART`` venue, with the IBKR fee model, as in ``ib_sandbox``.
 """
@@ -53,6 +53,9 @@ class FakeData(MarketDataClient):
         pass
 
     async def _request_instrument(self, request):
+        # As IB's adapter: one instrument per request.
+        if len(request.instrument_ids) != 1:
+            raise ValueError(f"request requires one instrument ID, received {len(request.instrument_ids)}")
         for instrument_id in request.instrument_ids:
             self._requests.append(instrument_id)
             instrument = equity(instrument_id)
