@@ -225,5 +225,6 @@ def test_the_snapshot_cash_of_the_paper_account_is_ibs_cash(tmp_path, run_dir):
 
     assert report.started and report.error is None, report
     snapshot = records.read_snapshot(live_dir, _today())
-    # Within a dollar per position of TWS's cash: the last prices are not TWS's marks to the cent.
-    assert snapshot.cash == pytest.approx(float(CASH), abs=1.0 + len(snapshot.positions) + len(snapshot.foreign))
+    # Quote mids are not IB's marks, by a few cents a share: within USD 5 a position of TWS's cash,
+    # where counting the positions twice, or at their cost, is off by far more.
+    assert snapshot.cash == pytest.approx(float(CASH), abs=5.0 * (1 + len(snapshot.positions) + len(snapshot.foreign)))
