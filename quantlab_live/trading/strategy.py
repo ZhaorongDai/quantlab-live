@@ -19,6 +19,7 @@ import pandas as pd
 from nautilus_trader.model import (
     AccountId,
     ClientId,
+    Currency,
     CustomData,
     DataType,
     ExecAlgorithmId,
@@ -455,18 +456,20 @@ def account_cash(cache, account) -> float:
     ----------
     cache : nautilus_trader.common.Cache
     account : nautilus_trader account
-        A MARGIN account, whose balance does not pay for its positions.
+        A MARGIN account, whose balance does not pay for its positions. Its
+        USD balance is read: an IB account has no base currency.
 
     Examples
     --------
     >>> from types import SimpleNamespace
-    >>> account = SimpleNamespace(id="SMART-001", balance_total=lambda: SimpleNamespace(as_decimal=lambda: 10_000))
+    >>> usd = {"USD": SimpleNamespace(as_decimal=lambda: 10_000)}
+    >>> account = SimpleNamespace(id="IB-DU123", balance_total=lambda currency: usd[currency.code])
     >>> held = [SimpleNamespace(signed_qty=100, avg_px_open=25.0), SimpleNamespace(signed_qty=-10, avg_px_open=50.0)]
     >>> cache = SimpleNamespace(positions_open=lambda account_id: held)
     >>> account_cash(cache, account)
     8000.0
     """
-    balance = float(account.balance_total().as_decimal())
+    balance = float(account.balance_total(Currency.from_str("USD")).as_decimal())
     positions = cache.positions_open(account_id=account.id)
     return balance - sum(float(p.signed_qty) * float(p.avg_px_open) for p in positions)
 
