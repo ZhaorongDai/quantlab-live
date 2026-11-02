@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from nautilus_trader.adapters.interactive_brokers import SymbologyMethod
+from nautilus_trader.adapters.interactive_brokers import MarketDataType, SymbologyMethod
 from nautilus_trader.model import InstrumentId
 
 import quantlab_live
@@ -178,6 +178,17 @@ def test_an_ib_client_needs_an_explicit_port(name):
     broker = profile(name, account_id="DU123", starting_cash=10_000.0)
     with pytest.raises(ValueError, match="port"):
         broker.data_clients(set())
+
+
+@pytest.mark.parametrize(("name", "market_data"), [
+    ("ibkr_paper", MarketDataType.DELAYED), ("ib_sandbox", MarketDataType.DELAYED),
+    ("ibkr_real", MarketDataType.REALTIME),
+])
+def test_only_real_money_insists_on_real_time_market_data(name, market_data):
+    # IB answers a delayed request with real-time data when the account subscribes to it.
+    broker = profile(name, port=4002, account_id="DU123", starting_cash=10_000.0)
+    (data,) = broker.data_clients(set())
+    assert data.config.market_data_type == market_data
 
 
 def test_a_profile_exists_for_real_brokers_only():
