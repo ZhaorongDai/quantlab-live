@@ -24,10 +24,11 @@ the supervisor through its step report only (``records.StepReport``):
    day's decision, the end-of-day snapshot and its final step report.
 
 A settle-only node restores from Redis and reconciles as a trading node
-does, trades nothing (its decision source publishes no bar), stops as soon
-as its start check has passed (start-up reconciliation is done by then), at
-the latest ``SETTLE_TIMEOUT_SECONDS`` after its start, and writes the
-outcomes.
+does, trades nothing (its decision source publishes no bar), stops once
+its start check has passed (start-up reconciliation is done by then) and
+every open position has a price to value the account's cash at, waiting at
+most ``PRICE_WAIT_SECONDS`` for them and ``SETTLE_TIMEOUT_SECONDS`` in all,
+and writes the outcomes and the snapshot.
 A dry run decides and writes the decision and the planned orders under
 ``dry-run/`` in the live directory, and submits nothing.
 """
@@ -56,7 +57,7 @@ from quantlab_live.quantlab_gate import QuantlabNotReady, open_run
 from quantlab_live.trading.outcomes import (
     FOREIGN, UNMAPPED, UNVERIFIED, order_bar, order_frames, order_outcomes, redecided,
 )
-from quantlab_live.trading.scheduled_execution import Session
+from quantlab_live.trading.scheduled_execution import PRICE_WAIT_SECONDS, Session
 from quantlab_live.trading.strategy import STRATEGY_ID, DirectoryDecisions, RecordedPnl, account_cash
 
 #: Where a dry run writes its decisions and planned orders, in the live directory.
@@ -237,8 +238,6 @@ def _run(
             except Exception as error:  # noqa: BLE001 - never refuses the start
                 alerts.append(f"deciding the unverified outcomes again failed: {error!r}")
         write(started=True, alerts=tuple(alerts))
-        if settle:  # start-up reconciliation is done: nothing is left to wait for
-            handle.stop()
         return None
 
     def refuse(reason: str) -> None:
@@ -257,11 +256,13 @@ def _run(
     if settle:
         node.add_actor(components.decision_source)  # the start check; it publishes no bar
         node.add_actor(_StopAt(pd.Timestamp.now(tz="UTC").value, SETTLE_TIMEOUT_SECONDS * NS, handle.stop))
+        # Start-up reconciliation is done once the start check has passed: wait only for the prices.
+        node.add_actor(_StopOncePriced(state_started, handle.stop))
     else:
         components.add_to(node)
         stop_at = session.close + pd.Timedelta(minutes=config.stop_after_close_minutes)
         node.add_actor(_StopAt(stop_at.value, config.min_node_seconds * NS, handle.stop))
-    if data_client is not None and not settle:
+    if data_client is not None:
         node.add_actor(_MarketData(data_client, loaded))
     node.run()
 
@@ -462,6 +463,37 @@ class _StopAt(DataActor):
     def on_start(self) -> None:
         at = max(self._at_ns, self.clock.timestamp_ns() + self._least_ns)
         self.clock.set_time_alert_ns("stop", at, lambda event: self._stop())
+
+
+class _StopOncePriced(DataActor):
+    """Stop a settle-only node once it has started and every open position has a price.
+
+    It waits at most ``PRICE_WAIT_SECONDS`` after the start for the prices;
+    a position still without one is valued at its cost (``account_cash``).
+    """
+
+    def __new__(cls, *args, **kwargs):
+        return super().__new__(cls)
+
+    def __init__(self, started: Callable[[], bool], stop: Callable[[], None]):
+        super().__init__(DataActorConfig(actor_id=ActorId("STOP-ONCE-PRICED-001")))
+        self._started, self._stop = started, stop
+        self._waited = 0
+
+    def on_start(self) -> None:
+        self.clock.set_timer_ns("priced", NS, callback=self._check)
+
+    def _check(self, event) -> None:
+        if not self._started():
+            return
+        unpriced = [
+            p for p in self.cache.positions_open()
+            if self.cache.quote(p.instrument_id) is None and self.cache.trade(p.instrument_id) is None
+        ]
+        if not unpriced or self._waited >= PRICE_WAIT_SECONDS:
+            self.clock.cancel_timer("priced")
+            self._stop()
+        self._waited += 1
 
 
 class _MarketData(DataActor):
