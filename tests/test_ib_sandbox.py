@@ -57,6 +57,8 @@ pytestmark = pytest.mark.skipif(not GATEWAY, reason="QUANTLAB_LIVE_IB_GATEWAY na
 A, B, C = 10001, 10002, 10003
 LISTINGS = {A: [(None, "AAPL", "NASDAQ")], B: [(None, "MSFT", "NASDAQ")], C: [(None, "KO", "NYSE")]}
 REPOSITORY = Path(__file__).resolve().parents[1]
+# Each run's live directories, and so its nodes' trader ids and Redis keys, are new.
+RUN_STAMP = time.strftime("%Y%m%d%H%M%S")
 
 
 def _today() -> pd.Timestamp:
@@ -101,7 +103,7 @@ def _live_dir(tmp_path: Path, run_dir: Path, name: str, **keys) -> Path:
     if REDIS is not None:
         values["redis_host"], values["redis_port"] = REDIS.rsplit(":", 1)[0], int(REDIS.rsplit(":", 1)[1])
     values.update(keys)
-    live_dir = tmp_path / name
+    live_dir = tmp_path / f"{name}-{RUN_STAMP}"
     live_dir.mkdir()
     lines = [f"{k} = {_toml(v)}" for k, v in values.items()]
     (live_dir / "live.toml").write_text("\n".join(lines) + "\n")
@@ -173,6 +175,7 @@ def test_a_node_killed_mid_day_restores_from_redis_and_submits_nothing_twice(tmp
 
     second = _node_process(live_dir, today, "second")
     log, _ = second.communicate(timeout=300)
+    (live_dir / "second.log").write_text(log)
 
     assert decision.read_bytes() == written  # resumed, not decided again
     assert "0 orders remain" in log, log[-4000:]

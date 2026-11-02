@@ -35,6 +35,7 @@ A dry run decides and writes the decision and the planned orders under
 from __future__ import annotations
 
 import dataclasses
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
@@ -148,6 +149,7 @@ def run_node(
     try:
         return _run(live_dir, date, settle, dry_run, broker, redis, session, write, lambda: state["report"].started)
     except Exception as error:
+        traceback.print_exc()
         return write(error=f"{type(error).__name__}: {error}")
 
 
