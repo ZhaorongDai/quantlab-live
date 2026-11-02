@@ -141,8 +141,12 @@ Each entry gives the limitation, the workaround and where it lives, and how to c
     - Workaround: `QuantlabStrategy` sends one request per missing instrument, and while orders wait for their instruments it also looks at the cache every second, leaving unsent only the orders whose instrument has not arrived `INSTRUMENT_WAIT_SECONDS` after the request (`trading/strategy.py`). The test data client refuses several ids too (`tests/fake_broker.py`).
     - Check: request two instruments in one call through the IB data client.
 
+39. **A partly filled sandbox order has no average price.** The sandbox's matching engine fills a market order level by level, and gives the fee model an order whose `filled_qty` counts the earlier levels but whose `avg_px` is still None. Found by the `ib_sandbox` smoke test (#11).
+    - Workaround: `IbkrFeeModel` values the earlier fills at the current fill's price when the order has no average price; only the commission's 1% cap depends on it (`brokers.py`).
+    - Check: fill a market order larger than the top of the book in the sandbox and read `avg_px` in the fee model.
+
 ## Corporate actions in replay
 
-39. **A position's quantity cannot change from Python.** NautilusTrader has no Python call that changes an open position's quantity, so a split cannot be applied to a position held through it.
+40. **A position's quantity cannot change from Python.** NautilusTrader has no Python call that changes an open position's quantity, so a split cannot be applied to a position held through it.
     - Workaround: replay trades in split-adjusted engine units, one unit being the raw shares of one share at the replay's first bar. The prints and marks it is fed are split adjusted (`SplitTable`), the fee model converts units back to raw shares at the order's `ts_init` (entry 19), the `DividendModule` pays dividends per unit, and the records are converted to raw units when written (`replay.py`, `brokers.py`). An upstream patch for corporate actions is optional later work.
     - Check: look for a split or position-adjustment event on positions, or a cache method that sets a position's quantity, and replay a split without the conversion.

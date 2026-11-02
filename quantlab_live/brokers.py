@@ -129,7 +129,9 @@ class IbkrFeeModel(FeeModel):
             return Money(0, currency)
         per_unit = self._shares_per_unit(order.instrument_id, order.ts_init)
         filled = float(order.filled_qty)
-        filled_value = filled * float(order.avg_px) if filled else 0.0
+        # A sandbox order partly filled may not carry its average price yet.
+        earlier_px = fill_px if order.avg_px is None else order.avg_px
+        filled_value = filled * float(earlier_px) if filled else 0.0
         units = filled + float(fill_quantity)
         value = filled_value + float(fill_quantity) * float(fill_px)
         charged = ibkr_commission(filled * per_unit, filled_value)

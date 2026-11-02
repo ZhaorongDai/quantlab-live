@@ -196,3 +196,20 @@ def test_nothing_outside_brokers_names_a_broker_adapter():
             if any(m.startswith("nautilus_trader.adapters") for m in modules):
                 naming.add(path)
     assert naming == {Path(brokers.__file__)}
+
+
+def test_a_second_partial_fill_is_charged_when_the_order_has_no_average_price_yet():
+    # The sandbox's matching engine fills a market order level by level, and hands
+    # the fee model an order already partly filled but without its average price.
+    from types import SimpleNamespace
+
+    from nautilus_trader.model import ClientOrderId, Currency, Price, Quantity
+
+    order = SimpleNamespace(
+        client_order_id=ClientOrderId("O-1"), instrument_id=InstrumentId.from_str("AAPL=STK.SMART"),
+        ts_init=0, filled_qty=Quantity.from_int(80), avg_px=None,
+    )
+    instrument = SimpleNamespace(quote_currency=Currency.from_str("USD"))
+    fee = IbkrFeeModel().get_commission(order, Quantity.from_int(45), Price.from_str("337.54"), instrument)
+    # 125 shares at USD 0.005 is 0.625, below the order's USD 1.00 minimum, charged on its first fill.
+    assert float(fee.as_decimal()) == 0.0
