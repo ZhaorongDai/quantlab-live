@@ -17,6 +17,7 @@ from typing import Protocol
 
 import pandas as pd
 from nautilus_trader.model import (
+    AccountId,
     ClientId,
     CustomData,
     DataType,
@@ -238,6 +239,11 @@ class QuantlabStrategy(Strategy):
         Unset, they size on the account's equity.
     pnl : StrategyPnl, optional
         The strategy's P&L; required with ``initial_capital``.
+    account_id : AccountId, optional
+        The account traded (live). IB keeps one account for every venue, so
+        it is not found by an instrument's venue; without it, the account is
+        the one of the venue the bar's instruments trade on (a sandbox or a
+        replay).
 
     Examples
     --------
@@ -268,12 +274,14 @@ class QuantlabStrategy(Strategy):
         dry_run: bool = False,
         initial_capital: float | None = None,
         pnl: StrategyPnl | None = None,
+        account_id: AccountId | None = None,
     ):
         super().__init__(_config(external_order_claims))
         if initial_capital is not None and pnl is None:
             raise ValueError("an initial_capital needs the strategy's P&L (pnl)")
         self._initial_capital = initial_capital
         self._pnl = pnl
+        self._account_id = account_id
         self._targets = targets
         self._map = security_map
         self._exec_algorithm_id = exec_algorithm_id
@@ -425,14 +433,19 @@ class QuantlabStrategy(Strategy):
         return frame.astype(float)
 
     def _cash(self, close: pd.Series) -> float:
-        """The account's cash (``account_cash``) on the venue the bar's instruments trade on.
+        """The traded account's cash (``account_cash``).
 
         A position the strategy does not own, or cannot map, costs cash but
         adds no value to the strategy capital.
         """
-        ids = (self._map.to_id(symbol) for symbol in close.index)
-        venue = next(i for i in ids if i is not None).venue
-        return account_cash(self.cache, self.cache.account_for_venue(venue))
+        if self._account_id is not None:
+            account = self.cache.account(self._account_id)
+        else:
+            ids = (self._map.to_id(symbol) for symbol in close.index)
+            account = self.cache.account_for_venue(next(i for i in ids if i is not None).venue)
+        if account is None:
+            raise RuntimeError(f"no account {self._account_id or 'on the venue'} in the cache")
+        return account_cash(self.cache, account)
 
 
 def account_cash(cache, account) -> float:

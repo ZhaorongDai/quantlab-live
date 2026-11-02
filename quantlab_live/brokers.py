@@ -180,6 +180,7 @@ IB_EXCHANGES = {
     "NYSEMKT": "AMEX",
     "NYSEARCA": "ARCA",
     "BATS": "BATS",
+    "TXSE": "TXSE",
 }
 #: The one venue of every ``ib_sandbox`` instrument.
 SMART = Venue("SMART")

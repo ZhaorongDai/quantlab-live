@@ -252,7 +252,7 @@ def _run(
         check=check, on_refused=refuse, external_order_claims=claims, instrument_client=data_client,
         session=session, initial_capital=config.initial_capital,
         pnl=None if config.initial_capital is None else RecordedPnl(live_dir, config.initial_capital),
-        alert=alert,
+        account_id=accounts[0] if accounts else None, alert=alert,
     )
     if settle:
         node.add_actor(components.decision_source)  # the start check; it publishes no bar

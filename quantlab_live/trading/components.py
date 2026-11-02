@@ -20,7 +20,7 @@ from typing import Any
 
 import pandas as pd
 from nautilus_trader.common import DataActor, DataActorConfig, Environment
-from nautilus_trader.model import ActorId, ClientId, CustomData, DataType, ExecAlgorithmId, InstrumentId
+from nautilus_trader.model import AccountId, ActorId, ClientId, CustomData, DataType, ExecAlgorithmId, InstrumentId
 
 from quantlab_live.trading.decision_bar import DecisionBar
 from quantlab_live.trading.scheduled_execution import ExecutionPlan, ScheduledExecution, Session
@@ -150,6 +150,7 @@ def parts(
     session: Session | None = None,
     initial_capital: float | None = None,
     pnl: StrategyPnl | None = None,
+    account_id: AccountId | None = None,
     alert: Callable[[str], None] | None = None,
 ) -> TradingParts:
     """Return the strategy, execution algorithm and actors of a node or a replay.
@@ -191,6 +192,8 @@ def parts(
         (``QuantlabStrategy``); unset, orders size on the account's equity.
     pnl : StrategyPnl, optional
         The strategy's P&L: ``RecordedPnl`` live, ``AccountPnl`` in a replay.
+    account_id : AccountId, optional
+        The account a live node trades (``QuantlabStrategy``).
     alert : callable, optional
         Where ``ScheduledExecution`` sends its immediate alerts (live).
 
@@ -241,6 +244,7 @@ def parts(
         records,
         external_order_claims=list(external_order_claims),
         instrument_client=instrument_client,
+        account_id=account_id,
         dry_run=dry_run,
         initial_capital=initial_capital,
         pnl=pnl,
