@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quantlab_live.trading.strategy import remaining_orders, size_orders, strategy_capital
+from types import SimpleNamespace
+
+from quantlab_live.trading.strategy import account_cash, remaining_orders, size_orders, strategy_capital
 
 CLOSE = pd.Series({1: 10.0, 2: 20.0})
 HELD = pd.DataFrame({"quantity": [5.0]}, index=[2])
@@ -76,3 +78,36 @@ def test_a_resumed_decision_never_trades_a_skipped_symbol():
 def test_resuming_after_everything_filled_orders_nothing():
     decision = _decision({1: 500.0, 2: 0.0}, {1: 500.0, 2: -150.0})
     assert remaining_orders(decision, pd.Series({1: 500.0}), pd.Series(dtype=float)).empty
+
+
+def _account(balance: float, positions: list, quotes: dict, trades: dict):
+    total = SimpleNamespace(as_decimal=lambda: balance)
+    account = SimpleNamespace(id="IB-DU123", balance_total=lambda currency: total)
+    cache = SimpleNamespace(
+        positions_open=lambda account_id: positions,
+        quote=lambda instrument_id: quotes.get(instrument_id),
+        trade=lambda instrument_id: trades.get(instrument_id),
+    )
+    return cache, account
+
+
+def test_a_net_liquidation_balance_less_its_positions_market_value_is_the_cash():
+    # IB's balance is the net liquidation: cash, accrued cash and the positions at market.
+    held = [
+        SimpleNamespace(instrument_id="A", signed_qty=100, avg_px_open=20.0),  # quoted 24.00 / 26.00
+        SimpleNamespace(instrument_id="B", signed_qty=10, avg_px_open=50.0),  # last traded at 40
+        SimpleNamespace(instrument_id="C", signed_qty=5, avg_px_open=30.0),  # no price: its cost
+    ]
+    quotes = {"A": SimpleNamespace(bid_price=24.0, ask_price=26.0)}
+    trades = {"B": SimpleNamespace(price=40.0)}
+    cache, account = _account(10_000.0, held, quotes, trades)
+
+    assert account_cash(cache, account, net_liquidation=True) == 10_000.0 - 2_500.0 - 400.0 - 150.0
+
+
+def test_a_cash_balance_less_its_positions_cost_is_the_cash():
+    # A sandbox's or a replay's balance is its cash, before what its positions cost.
+    held = [SimpleNamespace(instrument_id="A", signed_qty=100, avg_px_open=20.0)]
+    cache, account = _account(10_000.0, held, {"A": SimpleNamespace(bid_price=24.0, ask_price=26.0)}, {})
+
+    assert account_cash(cache, account) == 8_000.0

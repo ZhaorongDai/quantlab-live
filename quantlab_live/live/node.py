@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import dataclasses
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 import exchange_calendars
@@ -46,7 +46,7 @@ from nautilus_trader.common import DataActor, DataActorConfig, Environment, Logg
 from nautilus_trader.infrastructure import RedisCacheConfig
 from nautilus_trader.live import LiveNodeBuilder, LiveNodeConfig
 from nautilus_trader.persistence import StreamingConfig
-from nautilus_trader.model import AccountId, ActorId, ClientId, TraderId
+from nautilus_trader.model import AccountId, ActorId, ClientId, InstrumentId, TraderId
 
 from quantlab_live import records, trading
 from quantlab_live.brokers import BrokerProfile
@@ -252,7 +252,7 @@ def _run(
         check=check, on_refused=refuse, external_order_claims=claims, instrument_client=data_client,
         session=session, initial_capital=config.initial_capital,
         pnl=None if config.initial_capital is None else RecordedPnl(live_dir, config.initial_capital),
-        account_id=accounts[0] if accounts else None, alert=alert,
+        account_id=accounts[0] if accounts else None, net_liquidation=profile.net_liquidation, alert=alert,
     )
     if settle:
         node.add_actor(components.decision_source)  # the start check; it publishes no bar
@@ -262,7 +262,7 @@ def _run(
         stop_at = session.close + pd.Timedelta(minutes=config.stop_after_close_minutes)
         node.add_actor(_StopAt(stop_at.value, config.min_node_seconds * NS, handle.stop))
     if data_client is not None and not settle:
-        node.add_actor(_MarketData(data_client))
+        node.add_actor(_MarketData(data_client, loaded))
     node.run()
 
     source = components.decision_source
@@ -283,7 +283,7 @@ def _run(
         return write(finished=True)
     alerts.extend(state_alerts(node.cache, security_map))
     outcomes = _write_outcomes(live_dir, bar, node.cache, security_map)
-    _write_snapshot(live_dir, date, node.cache, security_map, accounts, exec_clients)
+    _write_snapshot(live_dir, date, node.cache, security_map, accounts, exec_clients, profile.net_liquidation)
     node.dispose()
     if outcomes is not None:
         for symbol, status in outcomes["status"].items():
@@ -420,14 +420,16 @@ def _positions(cache, security_map) -> pd.DataFrame:
     return frame.rename_axis("symbol")
 
 
-def _write_snapshot(live_dir: Path, date: pd.Timestamp, cache, security_map, accounts, exec_clients) -> None:
+def _write_snapshot(
+    live_dir: Path, date: pd.Timestamp, cache, security_map, accounts, exec_clients, net_liquidation: bool,
+) -> None:
     """Write the end-of-day snapshot: the strategy's positions by symbol, the account's cash, and
     the positions the strategy does not own (foreign) by instrument id."""
     account = next((cache.account(a) for a in accounts if cache.account(a) is not None), None)
     if account is None:
         venues = [getattr(c.config, "venue", None) for c in exec_clients]
         account = next((cache.account_for_venue(v) for v in venues if v is not None), None)
-    cash = float("nan") if account is None else account_cash(cache, account)
+    cash = float("nan") if account is None else account_cash(cache, account, net_liquidation=net_liquidation)
     positions = _positions(cache, security_map)
     foreign = {}
     for position in cache.positions_open():
@@ -463,19 +465,25 @@ class _StopAt(DataActor):
 
 
 class _MarketData(DataActor):
-    """Subscribe to the quotes and trades of every instrument loaded.
+    """Subscribe to the quotes and trades of every instrument in the cache.
 
-    The risk engine prices a market order from the cache, and a simulated
-    venue fills on these quotes.
+    The risk engine prices a market order from the cache, a simulated venue
+    fills on these quotes, and IB's cash values the positions at them. An
+    instrument the data client did not load (a position reconciliation
+    brought in) is requested from it first, one per request, and subscribed
+    once it arrives: the client refuses a subscription to an instrument it
+    does not know.
     """
 
     def __new__(cls, *args, **kwargs):
         return super().__new__(cls)
 
-    def __init__(self, client_id: ClientId):
+    def __init__(self, client_id: ClientId, loaded: Collection[InstrumentId] = ()):
         super().__init__(DataActorConfig(actor_id=ActorId("MARKET-DATA-001")))
         self._client_id = client_id
+        self._known = set(loaded)
         self._subscribed: set = set()
+        self._requested: set = set()
 
     def on_start(self) -> None:
         self._subscribe(None)
@@ -483,7 +491,15 @@ class _MarketData(DataActor):
 
     def _subscribe(self, event) -> None:
         for instrument_id in self.cache.instrument_ids():
-            if instrument_id not in self._subscribed:
+            if instrument_id in self._subscribed:
+                continue
+            if instrument_id in self._known:
                 self._subscribed.add(instrument_id)
                 self.subscribe_quotes(instrument_id, client_id=self._client_id)
                 self.subscribe_trades(instrument_id, client_id=self._client_id)
+            elif instrument_id not in self._requested:
+                self._requested.add(instrument_id)
+                self.request_instrument(
+                    instrument_id, client_id=self._client_id,
+                    callback=lambda _, instrument_id=instrument_id: self._known.add(instrument_id),
+                )

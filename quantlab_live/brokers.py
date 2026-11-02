@@ -334,6 +334,9 @@ class BrokerProfile:
     simulated : bool
         Whether its orders fill in a simulated venue (a sandbox), never at
         the broker.
+    net_liquidation : bool
+        Whether its account's balance is the net liquidation, positions at
+        market included, rather than cash (``account_cash``).
     """
 
     name: str
@@ -343,6 +346,7 @@ class BrokerProfile:
     build_map: MapBuilder
     fee_model: Callable[..., FeeModel]
     simulated: bool = False
+    net_liquidation: bool = False
 
 
 _MARKET_DATA = {"realtime": MarketDataType.REALTIME, "delayed": MarketDataType.DELAYED}
@@ -469,4 +473,5 @@ def profile(
         build_map=map_builder(smart_id if sandbox else primary_exchange_id),
         fee_model=IbkrFeeModel,
         simulated=sandbox,
+        net_liquidation=not sandbox,  # IB reports the net liquidation as the balance
     )

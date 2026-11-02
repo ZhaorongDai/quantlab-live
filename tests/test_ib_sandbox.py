@@ -24,10 +24,11 @@ sandbox fills its orders on IB's quotes. It checks:
   submits nothing again;
 - a start on an account of the other mode is refused before any order;
 - an ``ibkr_paper`` start with positions held overnight reconciles (dry run);
-- the snapshot's cash on the paper account is IB's cash: ``account_cash``
-  subtracts the open positions' cost from the account's balance, which holds
-  for the sandbox's MARGIN account, but would count the positions twice if
-  IB's balance is already net of them. Open until this test has run.
+- the snapshot's cash on the paper account is IB's cash: IB reports the net
+  liquidation as the balance, and ``account_cash`` subtracts the positions at
+  their last prices. ``QUANTLAB_LIVE_IB_CASH`` is TWS's cash plus its accrued
+  cash (``TotalCashValue`` + ``AccruedCash``), both part of the net
+  liquidation.
 """
 
 from __future__ import annotations
@@ -224,5 +225,5 @@ def test_the_snapshot_cash_of_the_paper_account_is_ibs_cash(tmp_path, run_dir):
 
     assert report.started and report.error is None, report
     snapshot = records.read_snapshot(live_dir, _today())
-    # Each position counted once: within a dollar per position of TWS's cash, not off by the portfolio's cost.
+    # Within a dollar per position of TWS's cash: the last prices are not TWS's marks to the cent.
     assert snapshot.cash == pytest.approx(float(CASH), abs=1.0 + len(snapshot.positions) + len(snapshot.foreign))

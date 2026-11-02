@@ -151,6 +151,7 @@ def parts(
     initial_capital: float | None = None,
     pnl: StrategyPnl | None = None,
     account_id: AccountId | None = None,
+    net_liquidation: bool = False,
     alert: Callable[[str], None] | None = None,
 ) -> TradingParts:
     """Return the strategy, execution algorithm and actors of a node or a replay.
@@ -193,7 +194,8 @@ def parts(
     pnl : StrategyPnl, optional
         The strategy's P&L: ``RecordedPnl`` live, ``AccountPnl`` in a replay.
     account_id : AccountId, optional
-        The account a live node trades (``QuantlabStrategy``).
+        The account a live node trades, and whether its balance is its net
+        liquidation (``QuantlabStrategy``).
     alert : callable, optional
         Where ``ScheduledExecution`` sends its immediate alerts (live).
 
@@ -245,6 +247,7 @@ def parts(
         external_order_claims=list(external_order_claims),
         instrument_client=instrument_client,
         account_id=account_id,
+        net_liquidation=net_liquidation,
         dry_run=dry_run,
         initial_capital=initial_capital,
         pnl=pnl,

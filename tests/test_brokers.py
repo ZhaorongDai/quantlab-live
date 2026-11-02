@@ -245,3 +245,8 @@ def test_a_texas_stock_exchange_listing_maps_to_ibs_txse_venue():
     # IB reports such a holding, ET for one, as ET.TXSE.
     assert brokers.primary_exchange_id("ET", "TXSE") == InstrumentId.from_str("ET.TXSE")
     assert brokers.smart_id("ET", "TXSE") == InstrumentId.from_str("ET=STK.SMART")
+
+
+@pytest.mark.parametrize(("name", "net_liquidation"), [("ibkr_paper", True), ("ibkr_real", True), ("ib_sandbox", False)])
+def test_an_ib_balance_is_the_net_liquidation_and_a_sandbox_balance_is_cash(name, net_liquidation):
+    assert profile(name).net_liquidation is net_liquidation

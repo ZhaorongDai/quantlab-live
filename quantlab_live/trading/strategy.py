@@ -245,6 +245,9 @@ class QuantlabStrategy(Strategy):
         it is not found by an instrument's venue; without it, the account is
         the one of the venue the bar's instruments trade on (a sandbox or a
         replay).
+    net_liquidation : bool, default False
+        Whether the account's balance is its net liquidation (IB), as
+        ``account_cash`` reads it.
 
     Examples
     --------
@@ -276,6 +279,7 @@ class QuantlabStrategy(Strategy):
         initial_capital: float | None = None,
         pnl: StrategyPnl | None = None,
         account_id: AccountId | None = None,
+        net_liquidation: bool = False,
     ):
         super().__init__(_config(external_order_claims))
         if initial_capital is not None and pnl is None:
@@ -283,6 +287,7 @@ class QuantlabStrategy(Strategy):
         self._initial_capital = initial_capital
         self._pnl = pnl
         self._account_id = account_id
+        self._net_liquidation = net_liquidation
         self._targets = targets
         self._map = security_map
         self._exec_algorithm_id = exec_algorithm_id
@@ -446,24 +451,31 @@ class QuantlabStrategy(Strategy):
             account = self.cache.account_for_venue(next(i for i in ids if i is not None).venue)
         if account is None:
             raise RuntimeError(f"no account {self._account_id or 'on the venue'} in the cache")
-        return account_cash(self.cache, account)
+        return account_cash(self.cache, account, net_liquidation=self._net_liquidation)
 
 
-def account_cash(cache, account) -> float:
-    """Return an account's cash: its balance less the cost of its every open position.
+def account_cash(cache, account, *, net_liquidation: bool = False) -> float:
+    """Return an account's cash: its USD balance less its open positions.
 
     Parameters
     ----------
     cache : nautilus_trader.common.Cache
     account : nautilus_trader account
-        A MARGIN account, whose balance does not pay for its positions. Its
-        USD balance is read: an IB account has no base currency.
+        A MARGIN account. Its USD balance is read: an IB account has no base
+        currency.
+    net_liquidation : bool, default False
+        Whether the balance is the account's net liquidation (IB: cash,
+        accrued cash and the positions at market), less which the positions
+        are valued at their last quote's mid or trade, or at their cost
+        without either. Otherwise the balance is cash before what the
+        positions cost (a sandbox, a replay), less which they are valued at
+        their cost.
 
     Examples
     --------
     >>> from types import SimpleNamespace
     >>> usd = {"USD": SimpleNamespace(as_decimal=lambda: 10_000)}
-    >>> account = SimpleNamespace(id="IB-DU123", balance_total=lambda currency: usd[currency.code])
+    >>> account = SimpleNamespace(id="SMART-001", balance_total=lambda currency: usd[currency.code])
     >>> held = [SimpleNamespace(signed_qty=100, avg_px_open=25.0), SimpleNamespace(signed_qty=-10, avg_px_open=50.0)]
     >>> cache = SimpleNamespace(positions_open=lambda account_id: held)
     >>> account_cash(cache, account)
@@ -471,7 +483,17 @@ def account_cash(cache, account) -> float:
     """
     balance = float(account.balance_total(Currency.from_str("USD")).as_decimal())
     positions = cache.positions_open(account_id=account.id)
-    return balance - sum(float(p.signed_qty) * float(p.avg_px_open) for p in positions)
+    price = _last_price if net_liquidation else lambda cache, position: float(position.avg_px_open)
+    return balance - sum(float(p.signed_qty) * price(cache, p) for p in positions)
+
+
+def _last_price(cache, position) -> float:
+    """A position's instrument's last quote mid or trade price, or its cost without either."""
+    quote = cache.quote(position.instrument_id)
+    if quote is not None:
+        return (float(quote.bid_price) + float(quote.ask_price)) / 2
+    trade = cache.trade(position.instrument_id)
+    return float(trade.price) if trade is not None else float(position.avg_px_open)
 
 
 def _is_primary(order) -> bool:
