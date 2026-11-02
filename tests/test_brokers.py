@@ -14,6 +14,7 @@ from nautilus_trader.model import InstrumentId
 import quantlab_live
 from quantlab_live import brokers, records
 from quantlab_live.brokers import IbkrFeeModel, profile
+from quantlab_live.live.config import LiveConfig
 from quantlab_live.quantlab_gate import open_run
 from quantlab_live.replay import IdentityMap
 from tests.quantlab_run_fixture import build_quantlab_run
@@ -224,3 +225,17 @@ def test_a_second_partial_fill_is_charged_when_the_order_has_no_average_price_ye
     fee = IbkrFeeModel().get_commission(order, Quantity.from_int(45), Price.from_str("337.54"), instrument)
     # 125 shares at USD 0.005 is 0.625, below the order's USD 1.00 minimum, charged on its first fill.
     assert float(fee.as_decimal()) == 0.0
+
+
+@pytest.mark.parametrize(("name", "market_data", "expected"), [
+    ("ibkr_real", "delayed", MarketDataType.DELAYED), ("ibkr_paper", "realtime", MarketDataType.REALTIME),
+])
+def test_live_toml_chooses_real_time_or_delayed_market_data_on_any_profile(name, market_data, expected):
+    config = LiveConfig(run="run", broker=name, gateway_port=4002, account_id="DU123", market_data=market_data)
+    (data,) = config.profile().data_clients(set())
+    assert data.config.market_data_type == expected
+
+
+def test_live_toml_refuses_an_unknown_market_data_type():
+    with pytest.raises(ValueError, match="market_data must be 'realtime' or 'delayed'"):
+        LiveConfig(run="run", market_data="frozen")

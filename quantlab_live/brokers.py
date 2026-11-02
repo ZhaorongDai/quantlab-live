@@ -344,6 +344,9 @@ class BrokerProfile:
     simulated: bool = False
 
 
+#: The IB market data types a profile can ask for: ``market_data`` of ``profile``.
+MARKET_DATA = {"realtime": MarketDataType.REALTIME, "delayed": MarketDataType.DELAYED}
+
 #: The profiles ``profile`` knows.
 PROFILES = ("ibkr_paper", "ibkr_real", "ib_sandbox")
 
@@ -356,12 +359,9 @@ def profile(
     client_id: int = 1,
     account_id: str | None = None,
     starting_cash: float | None = None,
+    market_data: str | None = None,
 ) -> BrokerProfile:
     """Return the broker profile ``name``.
-
-    Its IB data client asks for delayed market data, which IB answers in
-    real time where the account subscribes to it; ``ibkr_real`` asks for
-    real time only.
 
     Parameters
     ----------
@@ -379,6 +379,10 @@ def profile(
         the sandbox's own simulated one.
     starting_cash : float, optional
         The sandbox account's starting USD cash; ``ib_sandbox`` requires it.
+    market_data : {"realtime", "delayed"}, optional
+        The market data the IB data client asks for: ``"realtime"`` on
+        ``ibkr_real`` and ``"delayed"`` on the others by default. IB answers
+        a delayed request in real time where the account subscribes to it.
 
     Raises
     ------
@@ -406,10 +410,10 @@ def profile(
     gateway = {"host": host, "port": port}
     sandbox = name == "ib_sandbox"
     # The strategy never decides from market data: it needs a price only for the
-    # risk engine's market-order check. IB answers a delayed request with
-    # real-time data where the account subscribes to it, so only real money
-    # insists on real time.
-    market_data = MarketDataType.REALTIME if name == "ibkr_real" else MarketDataType.DELAYED
+    # risk engine's market-order check, which delayed data gives too.
+    market_data = market_data or ("realtime" if name == "ibkr_real" else "delayed")
+    if market_data not in MARKET_DATA:
+        raise ValueError(f"market_data must be 'realtime' or 'delayed', not {market_data!r}")
 
     def provider(instrument_ids: Collection[InstrumentId]) -> InteractiveBrokersInstrumentProviderConfig:
         if sandbox:
@@ -430,7 +434,7 @@ def profile(
         need_port()
         config = InteractiveBrokersDataClientConfig(
             **gateway, client_id=client_id, instrument_provider=provider(instrument_ids),
-            market_data_type=market_data,
+            market_data_type=MARKET_DATA[market_data],
         )
         return (Client("IB", InteractiveBrokersDataClientFactory(), config),)
 

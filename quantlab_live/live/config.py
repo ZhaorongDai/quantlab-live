@@ -98,6 +98,9 @@ class LiveConfig:
     client_id : int, default 1
         The IB API client id of the node's data client; its execution
         client takes the next one.
+    market_data : {"realtime", "delayed"}, optional
+        The IB market data asked for; the profile's default, ``"realtime"``
+        on ``ibkr_real`` and ``"delayed"`` otherwise (``brokers.profile``).
     account_id : str, optional
         The IB account; the ``TWS_ACCOUNT`` environment variable by default.
     starting_cash : float, optional
@@ -154,6 +157,7 @@ class LiveConfig:
     gateway_host: str = "127.0.0.1"
     gateway_port: int | None = None
     client_id: int = 1
+    market_data: str | None = None
     account_id: str | None = None
     starting_cash: float | None = None
     stop_after_close_minutes: int = 10
@@ -170,6 +174,7 @@ class LiveConfig:
         if self.max_notional_per_order is not None and not self.max_notional_per_order > 0:
             raise ValueError(f"max_notional_per_order must be positive, not {self.max_notional_per_order!r}")
         self.risk_engine_config()  # validates the submit rate
+        self.profile()  # validates the broker and its market data
 
     @property
     def plan(self) -> ExecutionPlan:
@@ -216,7 +221,7 @@ class LiveConfig:
         """The broker profile, connected as configured (``brokers.profile``)."""
         return brokers.profile(
             self.broker, host=self.gateway_host, port=self.gateway_port, client_id=self.client_id,
-            account_id=self.ib_account, starting_cash=self.starting_cash,
+            account_id=self.ib_account, starting_cash=self.starting_cash, market_data=self.market_data,
         )
 
     def switches(self) -> Switches:
