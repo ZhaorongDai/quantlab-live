@@ -160,7 +160,10 @@ def test_the_risk_engine_denies_an_order_above_the_notional_cap(tmp_path, run_di
 @pytest.mark.skipif(REDIS is None, reason="QUANTLAB_LIVE_REDIS names no Redis")
 def test_a_node_killed_mid_day_restores_from_redis_and_submits_nothing_twice(tmp_path, low_run_dir):
     # Buy limits at the run's closes, far below the market: they rest, working, when the node dies.
-    live_dir = _live_dir(tmp_path, low_run_dir, "crash", at=_soon(), order="limit", band_bps=0.0, min_node_seconds=60)
+    # The first node must outlive the plan's time (two minutes away) to be killed with its children working.
+    live_dir = _live_dir(
+        tmp_path, low_run_dir, "crash", at=_soon(), order="limit", band_bps=0.0, min_node_seconds=600,
+    )
     today = _today()
     first = _node_process(live_dir, today, "first")
     report = live_dir / "first.json"
@@ -170,6 +173,9 @@ def test_a_node_killed_mid_day_restores_from_redis_and_submits_nothing_twice(tmp
     time.sleep(150)  # past the plan's time: the children are working
     first.send_signal(signal.SIGKILL)
     first.wait()
+    assert not records.read_step_report(report).finished  # killed, not stopped
+    toml = live_dir / "live.toml"
+    toml.write_text(toml.read_text().replace("min_node_seconds = 600", "min_node_seconds = 60"))
     decision = live_dir / records.DECISIONS / f"{decision_bar_of(today).date()}.parquet"
     written = decision.read_bytes()
 
