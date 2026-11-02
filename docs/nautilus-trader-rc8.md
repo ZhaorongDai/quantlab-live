@@ -114,7 +114,7 @@ Each entry gives the limitation, the workaround and where it lives, and how to c
     - Check: build an IB client config without a port and read its `port`.
 
 32. **A market order needs a cached price.** The risk engine denies a `MARKET` order (`MARKET_PRICE_UNAVAILABLE`) on an instrument with no quote or trade in the cache, on every account, with or without a notional cap. A node just started, or an instrument just loaded at runtime, has none.
-    - Workaround: the node's market-data actor subscribes to the quotes and trades of every instrument loaded, and a live `ScheduledExecution` child waits up to `PRICE_WAIT_SECONDS` for a first price before it is sent (`live/node.py`, `trading/scheduled_execution.py`).
+    - Workaround: the node's market-data actor subscribes to the quotes of every instrument in the cache, and a live `ScheduledExecution` child waits up to `PRICE_WAIT_SECONDS` for a first price before it is sent (`live/node.py`, `trading/scheduled_execution.py`).
     - Check: submit a market order on an instrument without a quote in a `LiveNode`.
 
 33. **The sandbox rejects auction time in force.** The sandbox execution client rejects `AT_THE_OPEN` and `AT_THE_CLOSE` orders ("time in force AT_THE_OPEN is not currently supported"), as the simulator does (entry 13).

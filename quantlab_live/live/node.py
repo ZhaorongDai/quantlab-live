@@ -497,14 +497,16 @@ class _StopOncePriced(DataActor):
 
 
 class _MarketData(DataActor):
-    """Subscribe to the quotes and trades of every instrument in the cache.
+    """Subscribe to the quotes of every instrument in the cache.
 
     The risk engine prices a market order from the cache, a simulated venue
     fills on these quotes, and IB's cash values the positions at them. An
     instrument the data client did not load (a position reconciliation
     brought in) is requested from it first, one per request, and subscribed
     once it arrives: the client refuses a subscription to an instrument it
-    does not know.
+    does not know. Trades are not subscribed: IB streams them tick by tick,
+    which needs a permission and a small subscription allowance of its own,
+    and a quote prices everything a trade would.
     """
 
     def __new__(cls, *args, **kwargs):
@@ -528,7 +530,6 @@ class _MarketData(DataActor):
             if instrument_id in self._known:
                 self._subscribed.add(instrument_id)
                 self.subscribe_quotes(instrument_id, client_id=self._client_id)
-                self.subscribe_trades(instrument_id, client_id=self._client_id)
             elif instrument_id not in self._requested:
                 self._requested.add(instrument_id)
                 self.request_instrument(
