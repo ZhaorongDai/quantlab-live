@@ -368,7 +368,8 @@ def profile(
         The IB API client id of the data client; the IB execution client
         takes the next one.
     account_id : str, optional
-        The IB account (``ibkr_*``) or the sandbox account (``ib_sandbox``).
+        The IB account (``ibkr_*``). ``ib_sandbox`` ignores it: its account is
+        the sandbox's own simulated one.
     starting_cash : float, optional
         The sandbox account's starting USD cash; ``ib_sandbox`` requires it.
 
@@ -436,7 +437,6 @@ def profile(
         config = SandboxExecutionClientConfig(
             venue=SMART,
             starting_balances=[Money(starting_cash, USD)],
-            **({} if account_id is None else {"account_id": account_id}),
             base_currency=USD,
             oms_type=OmsType.NETTING,
             account_type=AccountType.MARGIN,

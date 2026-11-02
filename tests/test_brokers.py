@@ -161,6 +161,13 @@ def test_ib_sandbox_takes_ib_data_and_fills_in_a_sandbox_on_the_smart_venue():
     assert isinstance(execution.config.fee_model, IbkrFeeModel)
 
 
+def test_ib_sandbox_fills_on_its_own_account_whatever_ib_account_is_set():
+    # TWS_ACCOUNT names the Gateway's IB account; the sandbox's simulated account is not it.
+    sandbox = profile("ib_sandbox", port=4002, account_id="DU123", starting_cash=10_000.0)
+    (execution,) = sandbox.exec_clients(set())
+    assert "DU123" not in str(execution.config.account_id)
+
+
 def test_ib_sandbox_needs_its_starting_cash():
     with pytest.raises(ValueError, match="starting_cash"):
         profile("ib_sandbox", port=4002).exec_clients(set())
