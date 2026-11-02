@@ -344,8 +344,7 @@ class BrokerProfile:
     simulated: bool = False
 
 
-#: The IB market data types a profile can ask for: ``market_data`` of ``profile``.
-MARKET_DATA = {"realtime": MarketDataType.REALTIME, "delayed": MarketDataType.DELAYED}
+_MARKET_DATA = {"realtime": MarketDataType.REALTIME, "delayed": MarketDataType.DELAYED}
 
 #: The profiles ``profile`` knows.
 PROFILES = ("ibkr_paper", "ibkr_real", "ib_sandbox")
@@ -412,8 +411,8 @@ def profile(
     # The strategy never decides from market data: it needs a price only for the
     # risk engine's market-order check, which delayed data gives too.
     market_data = market_data or ("realtime" if name == "ibkr_real" else "delayed")
-    if market_data not in MARKET_DATA:
-        raise ValueError(f"market_data must be 'realtime' or 'delayed', not {market_data!r}")
+    if market_data not in _MARKET_DATA:
+        raise ValueError(f"market_data must be one of {tuple(_MARKET_DATA)}, not {market_data!r}")
 
     def provider(instrument_ids: Collection[InstrumentId]) -> InteractiveBrokersInstrumentProviderConfig:
         if sandbox:
@@ -434,7 +433,7 @@ def profile(
         need_port()
         config = InteractiveBrokersDataClientConfig(
             **gateway, client_id=client_id, instrument_provider=provider(instrument_ids),
-            market_data_type=MARKET_DATA[market_data],
+            market_data_type=_MARKET_DATA[market_data],
         )
         return (Client("IB", InteractiveBrokersDataClientFactory(), config),)
 

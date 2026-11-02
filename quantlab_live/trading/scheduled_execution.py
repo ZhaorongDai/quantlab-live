@@ -359,8 +359,9 @@ class ScheduledExecution(ExecutionAlgorithm):
     alert : callable, optional
         ``alert(text)``, called at once when an order falls back from the
         opening auction, a closing-auction order is missed or ended by the
-        venue, or a timed plan's order is past its deadline (a live node
-        mails it); such events are only logged without it.
+        venue, a timed plan's order is past its deadline, or a live child is
+        sent without a price (a live node mails it); such events are only
+        logged without it.
 
     Examples
     --------
@@ -441,7 +442,7 @@ class ScheduledExecution(ExecutionAlgorithm):
         priced = self.cache.quote(instrument_id) is not None or self.cache.trade(instrument_id) is not None
         if priced or send.waited >= PRICE_WAIT_SECONDS:
             if not priced:
-                self.log.warning(f"{instrument_id} has no price after {send.waited} s; sending {send.child} anyway")
+                self._warn(f"{instrument_id} has no price after {send.waited} s; sending {send.child} anyway")
             self._submit(primary, send.child, Quantity.from_str(send.quantity), last_print=None)
             return
         later = dataclasses.replace(send, waited=send.waited + 1)

@@ -237,5 +237,5 @@ def test_live_toml_chooses_real_time_or_delayed_market_data_on_any_profile(name,
 
 
 def test_live_toml_refuses_an_unknown_market_data_type():
-    with pytest.raises(ValueError, match="market_data must be 'realtime' or 'delayed'"):
+    with pytest.raises(ValueError, match="market_data must be one of"):
         LiveConfig(run="run", market_data="frozen")

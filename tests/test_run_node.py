@@ -21,6 +21,7 @@ from quantlab_live.cli import main
 from quantlab_live.live import run_node
 from quantlab_live.live.guards import ARMING_FILE
 from quantlab_live.live.node import ARCHIVE_DIR, DRY_RUN_DIR, claimed_instruments
+from quantlab_live.trading import scheduled_execution
 from quantlab_live.trading.scheduled_execution import Session
 from tests.fake_broker import fake_profile
 from tests.quantlab_run_fixture import RET_5, build_constructor_run, topk_dropout
@@ -279,3 +280,14 @@ def test_a_timed_plan_past_its_deadline_sends_nothing_and_alerts_at_once(live_di
     assert report.error is None
     assert records.read_outcomes(live_dir, BAR)["status"].tolist() == ["not_sent", "not_sent"]
     assert sum(f"past the {at} plan's deadline" in alert for alert in report.alerts) == 2, report.alerts
+
+
+def test_a_market_order_without_a_price_alerts_at_once(live_dir, monkeypatch):
+    # IB sends no quote at all for real-time data the account does not subscribe to.
+    monkeypatch.setattr(scheduled_execution, "PRICE_WAIT_SECONDS", 2)
+    no_prices = dict.fromkeys(PRICES)
+
+    report = run_node(live_dir, DATE, broker=fake_profile(no_prices)[0], redis=False, session=around_now())
+
+    assert report.error is None
+    assert sum("has no price after 2 s" in alert for alert in report.alerts) == 2, report.alerts

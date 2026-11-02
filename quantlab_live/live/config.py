@@ -99,8 +99,8 @@ class LiveConfig:
         The IB API client id of the node's data client; its execution
         client takes the next one.
     market_data : {"realtime", "delayed"}, optional
-        The IB market data asked for; the profile's default, ``"realtime"``
-        on ``ibkr_real`` and ``"delayed"`` otherwise (``brokers.profile``).
+        The IB market data asked for; the profile's default by default
+        (``brokers.profile``).
     account_id : str, optional
         The IB account; the ``TWS_ACCOUNT`` environment variable by default.
     starting_cash : float, optional

@@ -66,6 +66,8 @@ class FakeData(MarketDataClient):
     async def _subscribe_quotes(self, command):
         for instrument_id in command.instrument_ids:
             price = self._prices.get(instrument_id.value, 10.0)
+            if price is None:  # no market data for it, as without a subscription
+                continue
             now = self.clock.timestamp_ns()
             self._handle_data(
                 QuoteTick(
@@ -92,7 +94,8 @@ class FakeDataFactory(DataClientFactory):
 def fake_profile(prices: dict[str, float], *, starting_cash: float = 10_000.0, account_id: str | None = None):
     """Return a broker profile with the fake data client and a sandbox on ``SMART``.
 
-    ``prices`` gives the quote price by instrument id text. ``account_id``
+    ``prices`` gives the quote price by instrument id text; None serves no
+    quote. ``account_id``
     names an account the broker must report: the sandbox never reports it,
     so the node's start check refuses. Returns the profile and the list of
     the instruments requested from it at runtime.
