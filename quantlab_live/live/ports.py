@@ -195,16 +195,17 @@ class SubprocessLauncher:
 class SmtpMailer:
     """Sends each mail over SMTP with SSL; a log section goes as a ``log.txt`` attachment.
 
-    ``from_env_file`` reads ``SMTP_HOST``, ``SMTP_PORT`` (465 by default),
-    ``SMTP_USER``, ``SMTP_PASSWORD``, ``MAIL_FROM`` (the user by default)
-    and ``MAIL_TO`` from an owner-only ``KEY=VALUE`` file.
+    ``from_env_file`` reads ``QUANTLAB_SMTP_HOST``, ``QUANTLAB_SMTP_PORT``
+    (465 by default), ``QUANTLAB_SMTP_USER``, ``QUANTLAB_SMTP_PASSWORD``,
+    ``QUANTLAB_MAIL_FROM`` (the user by default) and ``QUANTLAB_MAIL_TO``
+    from an owner-only ``KEY=VALUE`` file.
 
     Examples
     --------
     >>> import tempfile
     >>> env = Path(tempfile.mkdtemp()) / "mail.env"
-    >>> _ = env.write_text("SMTP_HOST=smtp.example.com\\nSMTP_USER=me@example.com\\nSMTP_PASSWORD=x\\n"
-    ...                    "MAIL_TO=me@example.com\\n")
+    >>> _ = env.write_text("QUANTLAB_SMTP_HOST=smtp.example.com\\nQUANTLAB_SMTP_USER=me@example.com\\n"
+    ...                    "QUANTLAB_SMTP_PASSWORD=x\\nQUANTLAB_MAIL_TO=me@example.com\\n")
     >>> mailer = SmtpMailer.from_env_file(env)
     >>> mailer.host, mailer.port, mailer.sender
     ('smtp.example.com', 465, 'me@example.com')
@@ -236,8 +237,9 @@ class SmtpMailer:
                 env[key.strip()] = text.strip().strip("'\"")
         try:
             return cls(
-                env["SMTP_HOST"], int(env.get("SMTP_PORT", 465)), env["SMTP_USER"], env["SMTP_PASSWORD"],
-                env.get("MAIL_FROM", env["SMTP_USER"]), env["MAIL_TO"],
+                env["QUANTLAB_SMTP_HOST"], int(env.get("QUANTLAB_SMTP_PORT", 465)), env["QUANTLAB_SMTP_USER"],
+                env["QUANTLAB_SMTP_PASSWORD"], env.get("QUANTLAB_MAIL_FROM", env["QUANTLAB_SMTP_USER"]),
+                env["QUANTLAB_MAIL_TO"],
             )
         except KeyError as missing:
             return UnconfiguredMailer(f"the mail settings at {path} lack {missing}")
