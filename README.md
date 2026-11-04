@@ -34,8 +34,10 @@ The live server runs three things: a checkout of this repository, one Docker Com
 IB Gateway and Redis, and cron.
 
 **Checkouts.** Clone quantlab (`main`) and this repository side by side in their own directory, apart
-from any other quantlab checkout on the server, and run `uv sync` in this one. A deploy is `git pull` in
-both, then `uv sync`, outside the live window (US weekdays, roughly 06:00 to 16:30 New York time).
+from any other quantlab checkout on the server, and run `uv sync` in this one. Add `--extra mosek` when
+the run's portfolio construction uses the MOSEK solver, which needs a MOSEK licence. A deploy is
+`git pull` in both, then the same `uv sync`, outside the live window (US weekdays, roughly 06:00 to
+16:30 New York time).
 
 **Compose project.** It holds two services:
 

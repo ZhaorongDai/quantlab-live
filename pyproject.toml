@@ -16,6 +16,11 @@ dependencies = [
     "exchange-calendars",
 ]
 
+[project.optional-dependencies]
+# The MOSEK solver, for runs whose portfolio construction names it; commercial,
+# it needs a MOSEK licence (quantlab's `mosek` extra).
+mosek = ["quantlab-py[mosek]"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
