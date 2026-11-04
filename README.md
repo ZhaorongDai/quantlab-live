@@ -28,6 +28,47 @@ uv run pytest -n auto
 
 Public functions carry NumPy docstrings with an Examples section; the examples run as doctests.
 
+## Deployment
+
+The live server runs three things: a checkout of this repository, one Docker Compose project with the
+IB Gateway and Redis, and cron.
+
+**Checkouts.** Clone quantlab (`main`) and this repository side by side in their own directory, apart
+from any other quantlab checkout on the server, and run `uv sync` in this one. A deploy is `git pull` in
+both, then `uv sync`, outside the live window (US weekdays, roughly 06:00 to 16:30 New York time).
+
+**Compose project.** It holds two services:
+
+- the IB Gateway, with its image pinned by digest, its API and VNC ports bound to 127.0.0.1 and its
+  credentials in an owner-only `.env` beside the compose file; and
+- Redis 7, with its image pinned by digest, bound to 127.0.0.1 on its default port, with AOF on and
+  `appendfsync everysec`, its data directory under the data root, `cpuset` on the cores the jobs use, and
+  the deploying user as its user, so the backup can read its files.
+
+**Settings.** They live in owner-only files in `~/.config/quantlab/`, never in the repository:
+
+- `ibkr.env` sets `TWS_ACCOUNT`.
+- `mail.env` sets `QUANTLAB_SMTP_HOST`, `QUANTLAB_SMTP_PORT` (465 by default; SMTP over SSL),
+  `QUANTLAB_SMTP_USER`, `QUANTLAB_SMTP_PASSWORD`, `QUANTLAB_MAIL_TO` and optionally `QUANTLAB_MAIL_FROM`.
+- `healthchecks.url` holds the ping URL of a healthchecks.io check with a one-hour period. The check
+  mails when the pings stop.
+
+**cron.** Every job runs hourly and checks the New York hour itself, so daylight-saving changes need no
+edit:
+
+| Job | When | What it does |
+| --- | --- | --- |
+| Gateway restart | 07:00 | `docker compose up -d --force-recreate ib-gateway`: a fresh login before the live day. Redis keeps running. |
+| Upkeep | 18:00 | Takes a Redis `BGSAVE` and archives the whole data directory (RDB and AOF) under the data root, keeping 14 days. Gzips each live directory's `logs/<day>.log` after 7 days and deletes it after 365. |
+| Ping | every hour | `curl` of the healthchecks.io URL: the dead-man signal. |
+| Live day | every hour | `taskset -c <cores> uv run python -m quantlab_live day <live_dir>`. |
+
+The live day binds the supervisor with `taskset`; the node and quantlab's prediction job get their own
+`taskset` from the code, and Redis gets its `cpuset`. So every process of a day runs on the same cores.
+
+**Restore.** Stop Redis (`docker compose stop redis`), move its data directory aside, unpack an archive
+into a fresh one, and start it again.
+
 ## Layout
 
 - `quantlab_live/quantlab_gate.py`: the only module that imports quantlab (an exact allowlist, enforced by a test). `open_run(run_dir)` reads a run in-process (decision bars, target inputs, listings), and `run.report(directory)` writes a live or replay directory's `metrics.json` and `report.html` with quantlab's metric and report functions, from the records alone; `prepare_day(run_dir, date, store=...)` waits for quantlab's daily data update and runs quantlab's live prediction job, bound to NUMA node 1 with `taskset`.
