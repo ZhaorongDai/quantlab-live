@@ -84,45 +84,43 @@ def default_ports(live_dir, config: LiveConfig) -> Ports:
     """The production adapters of a live directory's ports.
 
     ``prepare`` is ``quantlab_gate.prepare_day`` on the run and its live
-    store, the node launcher starts a ``node`` process per attempt bound to
-    the configured CPUs, the mailer reads the owner's mail settings
+    store, the node launcher starts a ``node`` process per attempt, the mailer reads the owner's mail settings
     (``SmtpMailer.from_env_file``) and the clock is the wall clock.
 
     Examples
     --------
     >>> import tempfile
     >>> live_dir = Path(tempfile.mkdtemp())
-    >>> ports = default_ports(live_dir, LiveConfig(run="run", live_dir=live_dir, cpus="0-3"))
-    >>> type(ports.launch_node).__name__, ports.launch_node.cpus, type(ports.clock).__name__
-    ('SubprocessLauncher', '0-3', 'WallClock')
+    >>> ports = default_ports(live_dir, LiveConfig(run="run", live_dir=live_dir))
+    >>> type(ports.launch_node).__name__, type(ports.clock).__name__
+    ('SubprocessLauncher', 'WallClock')
     """
 
     def prepare(date):
-        return prepare_day(config.run_dir, date, store=config.store_dir, may_lag=config.may_lag, cpus=config.cpus)
+        return prepare_day(config.run_dir, date, store=config.store_dir, may_lag=config.may_lag)
 
     return Ports(
         prepare=prepare,
-        launch_node=SubprocessLauncher(live_dir, cpus=config.cpus),
+        launch_node=SubprocessLauncher(live_dir),
         mailer=SmtpMailer.from_env_file(),
         clock=WallClock(),
     )
 
 
 class SubprocessLauncher:
-    """Starts each node in a fresh process bound with ``taskset``; its output goes to the day's log.
+    """Starts each node in a fresh process; its output goes to the day's log.
 
     The node writes its step report to ``steps/<date>/<attempt>-<mode>.json``,
     a path it gets on its command line. The handle names the process and
     the report, so a supervisor that restarts after a crash polls the node
     an earlier supervisor started. A process that ends without a report
-    did not start.
+    did not start. The node inherits the supervisor's CPU affinity, so
+    binding the supervisor (``taskset`` in its cron line) binds the node.
 
     Parameters
     ----------
     live_dir : path-like
         The live directory.
-    cpus : str
-        The ``taskset`` CPU list.
     program : sequence of str
         The node's command before its arguments (``NODE_PROGRAM``).
 
@@ -130,15 +128,14 @@ class SubprocessLauncher:
     --------
     ::
 
-        launcher = SubprocessLauncher(live_dir, cpus="64-127")
+        launcher = SubprocessLauncher(live_dir)
         handle = launcher.start(pd.Timestamp("2024-01-03"), "trade", 1)
         while (report := launcher.poll(handle)) is None:
             time.sleep(60)
     """
 
-    def __init__(self, live_dir, cpus: str, program: Sequence[str] = NODE_PROGRAM):
+    def __init__(self, live_dir, program: Sequence[str] = NODE_PROGRAM):
         self.live_dir = Path(live_dir).absolute()
-        self.cpus = cpus
         self.program = tuple(program)
         self._children: dict[int, subprocess.Popen] = {}
 
@@ -149,7 +146,7 @@ class SubprocessLauncher:
         log = self.live_dir / "logs" / f"{day}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         command = [
-            "taskset", "-c", self.cpus, *self.program,
+            *self.program,
             str(self.live_dir), day, "--mode", mode, "--report", str(report),
         ]
         with open(log, "ab") as output:

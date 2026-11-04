@@ -63,15 +63,17 @@ edit:
 | Ping | every hour | `curl` of the healthchecks.io URL: the dead-man signal. |
 | Live day | every hour | `taskset -c <cores> uv run python -m quantlab_live day <live_dir>`. |
 
-The live day binds the supervisor with `taskset`; the node and quantlab's prediction job get their own
-`taskset` from the code, and Redis gets its `cpuset`. So every process of a day runs on the same cores.
+The code binds no process to cores. To keep a day on chosen cores, the live day's cron line starts the
+supervisor under `taskset`; the node and quantlab's prediction job are its child processes and inherit the
+binding, and Redis gets the same cores through its `cpuset`. `<cores>` is a CPU list such as `0-7`; drop
+`taskset -c <cores>` to use every core.
 
 **Restore.** Stop Redis (`docker compose stop redis`), move its data directory aside, unpack an archive
 into a fresh one, and start it again.
 
 ## Layout
 
-- `quantlab_live/quantlab_gate.py`: the only module that imports quantlab (an exact allowlist, enforced by a test). `open_run(run_dir)` reads a run in-process (decision bars, target inputs, listings), and `run.report(directory)` writes a live or replay directory's `metrics.json` and `report.html` with quantlab's metric and report functions, from the records alone; `prepare_day(run_dir, date, store=...)` waits for quantlab's daily data update and runs quantlab's live prediction job, bound to NUMA node 1 with `taskset`.
+- `quantlab_live/quantlab_gate.py`: the only module that imports quantlab (an exact allowlist, enforced by a test). `open_run(run_dir)` reads a run in-process (decision bars, target inputs, listings), and `run.report(directory)` writes a live or replay directory's `metrics.json` and `report.html` with quantlab's metric and report functions, from the records alone; `prepare_day(run_dir, date, store=...)` waits for quantlab's daily data update and runs quantlab's live prediction job.
 - `quantlab_live/trading/`: NautilusTrader extension classes, the same live and in replay: `DecisionBar` (one decision bar's quantlab inputs as custom data), `QuantlabStrategy` (which writes each decision before its first order and resumes a decided bar after a restart), its target sources, the `ScheduledExecution` execution algorithm and `order_outcomes` (one outcome per ordered symbol, priced only from fills).
 - `quantlab_live/records.py`: the repository's own records (decisions, outcomes, snapshots, equity, the account history `account.toml`), typed parquet in raw units; `read_book` reads them all back for a report.
 - `quantlab_live/replay.py`: `replay(run_dir, loop="closed" | "open", start=None, end=None)` trades a quantlab run, or a window of it, on NautilusTrader's `BacktestEngine` and writes the records, `metrics.json` and `report.html` from them, and NautilusTrader's reports for audit. `restarts=[...]` restarts the node mid-replay as after a crash, and a replay into a decided directory resumes its decisions.

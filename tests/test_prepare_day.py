@@ -1,17 +1,14 @@
 """quantlab_gate.prepare_day: the data update's status, then quantlab's prediction job once.
 
-The job runs as a subprocess under ``taskset -c 64-127`` (NUMA node 1). The
-tests put a stand-in ``taskset`` first on ``PATH`` that records its
-arguments and runs the command it was given, so the binding is checked on a
-machine without ``taskset`` (or with fewer cores) while the job itself is
-quantlab's, on a tiny real run with a model.
+The job is quantlab's, on a tiny real run with a model. The tests record
+each job command at the process boundary (``subprocess.run``) and run it,
+so they can check that repeated polls run the job once.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import stat
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -44,15 +41,16 @@ def model_run(tmp_path):
 
 
 @pytest.fixture
-def taskset(tmp_path, monkeypatch):
-    """A ``taskset`` stand-in on ``PATH``; returns the file listing each call's arguments."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    calls = tmp_path / "taskset.calls"
-    script = bin_dir / "taskset"
-    script.write_text(f'#!/bin/sh\necho "$@" >> {calls}\nshift 2\nexec "$@"\n')
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+def jobs(monkeypatch):
+    """Each prediction job command, recorded as it runs; the job itself runs as it would."""
+    calls, run = [], subprocess.run
+
+    def recorded(command, *args, **kwargs):
+        if "quantlab_live.quantlab_gate" in command:  # not quantlab's own git calls
+            calls.append(" ".join(command))
+        return run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recorded)
     # The run's factor class lives in the test fixture, which the job imports.
     monkeypatch.setenv("PYTHONPATH", str(REPOSITORY))
     return calls
@@ -65,11 +63,7 @@ def _status(data_root: Path, date: str, state: str) -> None:
     )
 
 
-def _calls(path: Path) -> list[str]:
-    return path.read_text().splitlines() if path.exists() else []
-
-
-def test_the_day_is_pending_until_the_data_update_is_done_for_the_date(model_run, taskset, tmp_path):
+def test_the_day_is_pending_until_the_data_update_is_done_for_the_date(model_run, jobs, tmp_path):
     data_root, store = tmp_path / "data", tmp_path / "live" / "live_predictions.zarr"
 
     def prepare():
@@ -83,39 +77,39 @@ def test_the_day_is_pending_until_the_data_update_is_done_for_the_date(model_run
     assert "running" in prepare().reason
     _status(data_root, TODAY, "no_new_bar")
     assert isinstance(prepare(), Pending)
-    assert _calls(taskset) == []
+    assert jobs == []
     assert not store.exists()
 
 
-def test_a_done_update_runs_the_job_once_on_numa_node_1_and_the_day_is_ready(model_run, taskset, tmp_path):
+def test_a_done_update_runs_the_job_once_and_the_day_is_ready(model_run, jobs, tmp_path):
     data_root, store = tmp_path / "data", tmp_path / "live" / "live_predictions.zarr"
     t = model_run.vendor_update()
     _status(data_root, TODAY, "done")
 
     assert prepare_day(model_run.run_dir, TODAY, store=store, data_root=data_root) == Ready(t)
-    calls = _calls(taskset)
-    assert len(calls) == 1 and calls[0].startswith("-c 64-127 ")
-    assert "quantlab_live.quantlab_gate" in calls[0]
+    assert len(jobs) == 1 and "quantlab_live.quantlab_gate predict" in jobs[0]
 
     # Polled again: ready at once, the job not run again.
     assert prepare_day(model_run.run_dir, TODAY, store=store, data_root=data_root) == Ready(t)
-    assert len(_calls(taskset)) == 1
+    assert len(jobs) == 1
 
     # The next day's update appends a bar: the job runs for it.
     later = model_run.vendor_update()
     _status(data_root, "2024-02-16", "done")
     assert prepare_day(model_run.run_dir, "2024-02-16", store=store, data_root=data_root) == Ready(later)
-    assert len(_calls(taskset)) == 2
+    assert len(jobs) == 2
 
 
 def test_a_job_refused_for_missing_data_leaves_the_day_pending(model_run, tmp_path, monkeypatch):
-    # A taskset whose job reports quantlab's missing-data refusal (exit 2).
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "taskset"
-    script.write_text('#!/bin/sh\necho "refused (missing_data): a store lacks the bar" >&2\nexit 2\n')
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    # A job that reports quantlab's missing-data refusal (exit 2).
+    run = subprocess.run
+
+    def refused(command, *args, **kwargs):
+        if "quantlab_live.quantlab_gate" not in command:
+            return run(command, *args, **kwargs)
+        return subprocess.CompletedProcess(command, 2, "", "refused (missing_data): a store lacks the bar")
+
+    monkeypatch.setattr(subprocess, "run", refused)
     data_root, store = tmp_path / "data", tmp_path / "live" / "live_predictions.zarr"
     model_run.vendor_update()
     _status(data_root, TODAY, "done")
@@ -125,7 +119,7 @@ def test_a_job_refused_for_missing_data_leaves_the_day_pending(model_run, tmp_pa
     assert "a store lacks the bar" in pending.reason
 
 
-def test_a_store_of_another_run_is_refused(model_run, taskset, tmp_path):
+def test_a_store_of_another_run_is_refused(model_run, jobs, tmp_path):
     data_root, store = tmp_path / "data", tmp_path / "live" / "live_predictions.zarr"
     _status(data_root, TODAY, "done")
     open_, close = _market()
@@ -134,10 +128,10 @@ def test_a_store_of_another_run_is_refused(model_run, taskset, tmp_path):
 
     with pytest.raises(ValueError, match="another run"):
         prepare_day(model_run.run_dir, TODAY, store=store, data_root=data_root)
-    assert len(_calls(taskset)) == 1
+    assert len(jobs) == 1
 
 
-def test_the_day_bar_reads_its_predictions_from_the_live_store(model_run, taskset, tmp_path):
+def test_the_day_bar_reads_its_predictions_from_the_live_store(model_run, jobs, tmp_path):
     data_root, store = tmp_path / "data", tmp_path / "live" / "live_predictions.zarr"
     t = model_run.vendor_update()
     run = open_run(model_run.run_dir)

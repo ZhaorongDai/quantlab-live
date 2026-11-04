@@ -11,7 +11,8 @@ targets and its symbols' listings.
 
 ``prepare_day`` is the process-level contract of a live day: it reads the
 status file of quantlab's daily data update and runs quantlab's live
-prediction job as a subprocess bound to NUMA node 1. Run as a module
+prediction job as a subprocess, which inherits the caller's CPU affinity.
+Run as a module
 (``python -m quantlab_live.quantlab_gate predict ...``), this file is that
 job.
 
@@ -96,9 +97,6 @@ REPORT_NOTES = [
 
 #: Decimal places of a raw price mark (instrument price precision).
 PRICE_PRECISION = 4
-
-#: The cores of NUMA node 1 on the trading server, which every job is bound to.
-NUMA_NODE_1_CPUS = "64-127"
 
 #: quantlab's daily data update writes its outcome here, under the data root.
 UPDATE_STATUS_FILE = "update_status.json"
@@ -789,7 +787,6 @@ def prepare_day(
     store: str | Path,
     data_root: str | Path | None = None,
     may_lag: Iterable[str | Path] = (),
-    cpus: str = NUMA_NODE_1_CPUS,
 ) -> Ready | Pending:
     """Make the run's prediction of the day's bar, once quantlab's data is up to date.
 
@@ -798,9 +795,9 @@ def prepare_day(
     bar of the run's price dataset: if the live prediction store already
     holds it the day is ``Ready`` at once, and otherwise quantlab's
     prediction job (``quantlab.backtest.live.predict_live_bar``) runs as a
-    subprocess under ``taskset -c <cpus>`` and appends it. The job is run
-    only while the bar is missing, so polling is safe and never predicts a
-    bar twice. Thread environment variables are passed through as they are.
+    subprocess and appends it. The job is run only while the bar is missing,
+    so polling is safe and never predicts a bar twice. The job inherits the
+    caller's CPU affinity and thread environment variables as they are.
 
     Parameters
     ----------
@@ -816,8 +813,6 @@ def prepare_day(
     may_lag : iterable of path, optional
         Stores the run reads that may end before the bar (a rate published
         the next business day).
-    cpus : str, default ``NUMA_NODE_1_CPUS``
-        The ``taskset`` CPU list of the job.
 
     Returns
     -------
@@ -866,7 +861,6 @@ def prepare_day(
     if live.has(bar):
         return Ready(bar)
     command = [
-        "taskset", "-c", cpus,
         sys.executable, "-m", "quantlab_live.quantlab_gate", "predict", str(run.run_dir),
         "--store", str(Path(store).absolute()),
         *(arg for path in may_lag for arg in ("--may-lag", str(path))),

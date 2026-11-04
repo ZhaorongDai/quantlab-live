@@ -22,7 +22,6 @@ from nautilus_trader.live import LiveRiskEngineConfig
 from quantlab_live import brokers
 from quantlab_live.brokers import BrokerProfile
 from quantlab_live.live.guards import ARMING_FILE, Switches, arming_state
-from quantlab_live.quantlab_gate import NUMA_NODE_1_CPUS
 from quantlab_live.trading.scheduled_execution import ExecutionPlan
 
 CONFIG_FILE = "live.toml"
@@ -85,8 +84,6 @@ class LiveConfig:
     may_lag : list of path, optional
         Stores the run reads that may end before the bar
         (``quantlab_gate.prepare_day``).
-    cpus : str
-        The CPU list every job of the day is bound to (NUMA node 1).
     redis_host, redis_port, redis_db :
         The node's cache database. NautilusTrader 2.0.0rc8 cannot select a
         Redis database, so ``redis_db`` must stay 0: paper and real money
@@ -150,7 +147,6 @@ class LiveConfig:
     heartbeat_stale_minutes: int = 10
     store: str | Path | None = None
     may_lag: tuple[str, ...] = ()
-    cpus: str = NUMA_NODE_1_CPUS
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
     redis_db: int = 0

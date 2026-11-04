@@ -2,16 +2,13 @@
 
 The node behind the seam is a stand-in program that writes a step report
 the way a node does, so the launcher's protocol (a fresh process per
-attempt, bound with ``taskset``, polled through a handle that outlives the
-supervisor) is checked without a broker. ``taskset`` is a stand-in on
-``PATH`` that records its arguments.
+attempt, polled through a handle that outlives the supervisor) is checked
+without a broker.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import stat
 import sys
 import time
 
@@ -43,24 +40,12 @@ report.write_text(json.dumps({"mode": mode, "started": True, "finished": True, "
 
 
 @pytest.fixture
-def taskset(tmp_path, monkeypatch):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    calls = tmp_path / "taskset.calls"
-    script = bin_dir / "taskset"
-    script.write_text(f'#!/bin/sh\necho "$@" >> {calls}\nshift 2\nexec "$@"\n')
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    return calls
-
-
-@pytest.fixture
-def launcher(tmp_path, taskset):
+def launcher(tmp_path):
     live_dir = tmp_path / "live"
     live_dir.mkdir()
     node = tmp_path / "node.py"
     node.write_text(NODE)
-    return SubprocessLauncher(live_dir, cpus="64-127", program=(sys.executable, str(node)))
+    return SubprocessLauncher(live_dir, program=(sys.executable, str(node)))
 
 
 def _until_ended(launcher, handle) -> records.StepReport:
@@ -71,7 +56,7 @@ def _until_ended(launcher, handle) -> records.StepReport:
     return report
 
 
-def test_a_node_runs_in_a_fresh_bound_process_and_reports_through_its_step_report(launcher, taskset):
+def test_a_node_runs_in_a_fresh_process_and_reports_through_its_step_report(launcher):
     (launcher.live_dir / "release").write_text("hold")
     handle = launcher.start(DAY, "trade", 1)
     assert launcher.poll(handle) is None
@@ -82,15 +67,13 @@ def test_a_node_runs_in_a_fresh_bound_process_and_reports_through_its_step_repor
     assert progress.started and not progress.finished
     (launcher.live_dir / "release").write_text("go")
     report = _until_ended(launcher, handle)
-    assert (report.started, report.finished, report.outcomes) == (True, True, True)
-    assert taskset.read_text().startswith("-c 64-127 ")
-    assert "--mode trade" in taskset.read_text()
+    assert (report.mode, report.started, report.finished, report.outcomes) == ("trade", True, True, True)
 
 
 def test_a_later_supervisor_polls_the_node_an_earlier_one_started(launcher):
     (launcher.live_dir / "release").write_text("hold")
     handle = launcher.start(DAY, "trade", 1)
-    later = SubprocessLauncher(launcher.live_dir, cpus="64-127", program=launcher.program)
+    later = SubprocessLauncher(launcher.live_dir, program=launcher.program)
     assert later.poll(handle) is None
     (launcher.live_dir / "release").write_text("crash")
     launcher._children[json.loads(handle)["pid"]].wait()  # reaped by its parent, as init would
