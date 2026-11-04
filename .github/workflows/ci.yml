@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: quantlab-live
+      # quantlab is a path dependency on a sibling checkout.
+      - uses: actions/checkout@v4
+        with:
+          repository: ZhaorongDai/quantlab
+          path: quantlab
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Install
+        working-directory: quantlab-live
+        run: uv sync
+      - name: Test
+        working-directory: quantlab-live
+        run: uv run pytest -n auto
