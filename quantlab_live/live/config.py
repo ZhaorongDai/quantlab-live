@@ -79,7 +79,7 @@ class LiveConfig:
     heartbeat_stale_minutes : int, default 10
         How old the supervisor's heartbeat may be before it alerts.
     store : str or pathlib.Path, optional
-        The run's live prediction store; ``live_predictions`` in the live
+        The run's live prediction store; ``live_predictions.zarr`` in the live
         directory by default.
     may_lag : list of path, optional
         Stores the run reads that may end before the bar
@@ -194,7 +194,7 @@ class LiveConfig:
     @property
     def store_dir(self) -> Path:
         """The live prediction store, resolved against the live directory."""
-        return (self.live_dir / (self.store or "live_predictions")).absolute()
+        return (self.live_dir / (self.store or "live_predictions.zarr")).absolute()
 
     @property
     def node_trader_id(self) -> str:

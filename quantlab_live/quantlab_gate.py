@@ -834,10 +834,10 @@ def prepare_day(
 
     >>> import tempfile
     >>> data_root = Path(tempfile.mkdtemp())
-    >>> prepare_day("run", "2024-01-03", store="live_predictions", data_root=data_root).reason
+    >>> prepare_day("run", "2024-01-03", store="live_predictions.zarr", data_root=data_root).reason
     "the data update's status ... is unreadable: ..."
     >>> _ = (data_root / UPDATE_STATUS_FILE).write_text('{"date": "2024-01-03", "state": "running"}')
-    >>> prepare_day("run", "2024-01-03", store="live_predictions", data_root=data_root).reason
+    >>> prepare_day("run", "2024-01-03", store="live_predictions.zarr", data_root=data_root).reason
     "the data update is not done for 2024-01-03: ... says 'running' for '2024-01-03'"
     """
     data_root = Path(get_data_root() if data_root is None else data_root)

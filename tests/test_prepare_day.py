@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quantlab_live.live.config import load_config
 from quantlab_live.quantlab_gate import Pending, QuantlabNotReady, Ready, open_run, prepare_day
 from tests.quantlab_run_fixture import build_model_run
 
@@ -79,6 +80,19 @@ def test_the_day_is_pending_until_the_data_update_is_done_for_the_date(model_run
     assert isinstance(prepare(), Pending)
     assert jobs == []
     assert not store.exists()
+
+
+def test_a_live_directory_without_a_store_setting_prepares_its_day(model_run, jobs, tmp_path):
+    live_dir, data_root = tmp_path / "live", tmp_path / "data"
+    live_dir.mkdir()
+    (live_dir / "live.toml").write_text(f'run = "{model_run.run_dir}"\n')
+    config = load_config(live_dir)
+    t = model_run.vendor_update()
+    _status(data_root, TODAY, "done")
+
+    assert prepare_day(config.run_dir, TODAY, store=config.store_dir, data_root=data_root) == Ready(t)
+    assert prepare_day(config.run_dir, TODAY, store=config.store_dir, data_root=data_root) == Ready(t)
+    assert len(jobs) == 1
 
 
 def test_a_done_update_runs_the_job_once_and_the_day_is_ready(model_run, jobs, tmp_path):
