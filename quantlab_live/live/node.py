@@ -45,7 +45,7 @@ import nautilus_trader
 import pandas as pd
 from nautilus_trader.common import DataActor, DataActorConfig, Environment, LoggerConfig, LogLevel
 from nautilus_trader.infrastructure import RedisCacheConfig
-from nautilus_trader.live import LiveNodeBuilder, LiveNodeConfig
+from nautilus_trader.live import LiveNodeBuilder, LiveNodeConfig, RoutingConfig
 from nautilus_trader.persistence import StreamingConfig
 from nautilus_trader.model import AccountId, ActorId, ClientId, InstrumentId, TraderId
 
@@ -215,7 +215,12 @@ def _run(
         if client.simulated:
             builder = builder.add_simulated_exec_client(client.name, client.factory, client.config)
         else:
-            builder = builder.add_exec_client(client.name, client.factory, client.config)
+            # The default route: an order without a client id (an execution algorithm's spawn)
+            # on a venue the client did not register (NYSE, NASDAQ) gets this client's account
+            # in the risk engine; without it every such order is denied.
+            builder = builder.add_exec_client(
+                client.name, client.factory, client.config, routing=RoutingConfig(default=True),
+            )
     node = builder.build()
     handle = node.handle()
     accounts = [AccountId(c.account_id) for c in exec_clients if c.account_id is not None]
